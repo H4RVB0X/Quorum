@@ -352,3 +352,45 @@ This was the root cause of multiple "connection refused" errors throughout the b
 | Briefings | `backend/briefings/YYYY-MM-DD_HHMM.txt` |
 | Agent generator | `backend/scripts/generate_agents.py` |
 | Seen URLs cache | `backend/scripts/seen_urls.json` |
+
+---
+
+## Session: 2026-04-11 — Archetype-Conditional Tick Prompts
+
+### What was built
+Modified `backend/scripts/simulation_tick.py` to fix the 68% hedge reaction skew.
+
+Two changes:
+1. **`ARCHETYPE_BEHAVIORS` dict** (module-level, after `VALID_REACTIONS`) — 7 entries mapping each archetype to a behavioral persona + reaction guidance string. Injected into the system prompt after the persona block, before memory.
+2. **Reaction definitions in user message** — replaced the bare `buy|hold|sell|panic|hedge` label with explicit per-reaction definitions. Critically, `hedge` is redefined as "a deliberate trade with a specific thesis, NOT a response to uncertainty." Added forced-choice closing line: "You must pick the single most likely action given your personality and the news. If nothing in the news is relevant to you, your answer is hold."
+
+### Architecture decisions
+- **Prompt-side only** — no post-processing fallback, no reaction remapping, no temperature changes. The redefinition of hedge is the primary fix; archetype behaviors are reinforcement.
+- **Order in system prompt**: instruction → persona → behavior → memory. Memory stays last (most proximate to the user turn).
+- **`ARCHETYPE_BEHAVIORS.get(archetype, "")`** — agents with unknown/missing archetype get no behavior block. Silent fallback, not an error.
+- **`pension_fund` nudge** — "you react very slowly to news — only major systemic events (rate policy shifts, sovereign defaults) justify action" rather than "you do not react to daily news", so extreme macro events still produce valid non-hold reactions.
+- **`prop_trader` panic** — "Panic is never appropriate — prop traders cut losses fast with a sell, not an emotional spiral." Consistent phrasing with other professional archetypes.
+
+### Blockers / incomplete items
+- No A/B data yet — need to run a tick with the new prompts and compare reaction distribution against the 68% hedge baseline.
+- The `verify_agent_diversity.py` check 7 (news reaction diversity) is the right tool to measure improvement after a full run.
+
+### Gotchas for next session
+- **Deploy is manual** — changes are local only until:
+  ```
+  docker cp backend/scripts/simulation_tick.py mirofish-offline:/app/backend/scripts/simulation_tick.py
+  docker restart mirofish-offline
+  ```
+- **Baseline for comparison**: pre-change distribution was 68% hedge / 25% buy / 7% hold / 0.2% sell / 0% panic. Target post-change: hedge sub-20%, more buy/sell/panic variation especially from prop_trader, hedge_fund, retail_amateur.
+- **`ARCHETYPE_BEHAVIORS` and `generate_agents.py` archetype keys must stay in sync** — if a new archetype is added to the generator, add a matching entry to `ARCHETYPE_BEHAVIORS` or that archetype gets no behavioral guidance.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/simulation_tick.py` | Added `ARCHETYPE_BEHAVIORS` dict; modified `build_prompt()` to inject behavior block; replaced bare reaction label with full definitions + forced-choice line |
+
+### Setup needed
+```bash
+docker cp backend/scripts/simulation_tick.py mirofish-offline:/app/backend/scripts/simulation_tick.py
+docker restart mirofish-offline
+```
