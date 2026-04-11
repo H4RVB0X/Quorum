@@ -394,3 +394,340 @@ Two changes:
 docker cp backend/scripts/simulation_tick.py mirofish-offline:/app/backend/scripts/simulation_tick.py
 docker restart mirofish-offline
 ```
+
+---
+
+## Session: 2026-04-11 — Prompt Hardening: Language Enforcement, Hedge/Panic Definitions, Archetype Audit
+
+### What was built
+Four targeted changes to `backend/scripts/simulation_tick.py` to fix a persistent hedge skew (51.2% hedge) and mojibake in reasoning text caused by qwen2.5:14b code-switching to Chinese.
+
+### Changes made
+1. **English enforcement in system prompt** — Added `"You must respond entirely in English. Do not use any other language."` as the first element of `system_parts` in `build_prompt()`. Fixes mojibake in `reasoning` fields caused by qwen2.5:14b switching to Chinese on emotionally-loaded or FOMO-adjacent prompts.
+
+2. **Tightened hedge definition** — Replaced the previous hedge definition with: "you are making a deliberate, specific trade to offset a named risk — you must be able to state exactly what instrument you are using and what exposure you are hedging. This is NOT a response to uncertainty or partial relevance. If you cannot name the instrument and the risk, choose hold instead." Adds the instrument+risk naming requirement as a hard gate.
+
+3. **Concrete panic triggers** — Replaced the previous panic definition with an explicit archetype restriction: only `retail_amateur` and `retail_experienced` can panic, and only during extreme stress events. Professional archetypes (`prop_trader`, `fund_manager`, `hedge_fund`, `family_office`, `pension_fund`) are explicitly told they never panic — they sell instead.
+
+4. **ARCHETYPE_BEHAVIORS audit** — Reviewed all 7 entries and removed/rewrote any phrasing that could imply hedging as a default cautious response. Key changes per archetype:
+   - `retail_amateur`: Added "if you are unsure, you hold, not hedge" to the Hold description.
+   - `retail_experienced`: Added "If uncertain, hold —" prefix; added naming requirement for hedge.
+   - `prop_trader`: Added "If you cannot state the exact instrument and the specific exposure you are offsetting, the answer is hold."
+   - `fund_manager`: Removed "measured, process-driven" (implies hedge as caution); replaced with "systematic"; added "When news is ambiguous, you hold" and "hedge requires a named instrument, not a reaction to ambiguous news."
+   - `family_office`: Removed "preservation" framing (implies defensive hedging); replaced with "growing and preserving... through compounding"; added "uncertainty is never a reason to act — when in doubt, you hold"; added "not a defensive reflex" to hedge description.
+   - `hedge_fund`: Added "and a named instrument" to hedge requirement.
+   - `pension_fund`: Added "If uncertain, hold." to hedge guidance.
+
+### Pre-change reaction distribution (baseline)
+- hedge 51.2% / buy 31.3% / hold 15.9% / sell 1.6% / panic 0%
+
+### Known issue fixed
+- Mojibake in `reasoning` field: qwen2.5:14b code-switches to Chinese on emotionally-loaded language (FOMO, fear, stress). Fixed by enforcing English at the top of the system prompt.
+
+### Target distribution
+- hedge < 20%, panic > 0% for retail archetypes under stress news, more variation across buy/sell/hold
+
+### Gotchas for next session
+- **Panic is now prompt-restricted to retail archetypes** — professional archetypes are told to sell instead. This means panic events in MemoryEvent nodes should only appear for `retail_amateur` and `retail_experienced` going forward.
+- **Hedge now requires instrument + risk naming in reasoning** — if the model hedges without naming an instrument in its reasoning, that is a prompt failure worth monitoring.
+- **qwen2.5:14b will code-switch without English enforcement** — the "respond entirely in English" line must remain at the very top of system_parts. Do not move it below the persona block.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/simulation_tick.py` | English enforcement in system prompt; tightened hedge definition; concrete panic archetype restrictions; ARCHETYPE_BEHAVIORS audit removing hedge-as-caution language |
+
+### Setup needed
+```bash
+docker cp backend/scripts/simulation_tick.py mirofish-offline:/app/backend/scripts/simulation_tick.py
+docker restart mirofish-offline
+```
+(Already deployed in this session.)
+
+---
+
+## Session: 2026-04-11 — News Relevance Filter + Feed Expansion (Nitter, FT, Bloomberg, Central Banks)
+
+### What was built
+
+**`backend/scripts/news_relevance_filter.py`** (new file)
+Standalone keyword-whitelist filter. Exposes `filter_articles(articles: list[dict]) -> list[dict]`. An article passes if its title or body contains any term from `FINANCIAL_TERMS` (~80 terms covering indices, macro, rates, FX, crypto, corporate events, instruments, sectors) or matches a ticker-symbol regex (`$AAPL`, `#SPX`). Logs pass/fail counts at INFO per call.
+
+**`backend/scripts/news_fetcher.py`** (significantly updated)
+Four additions to the news pipeline:
+
+1. **Relevance filter** — after all general RSS + Nitter articles are fetched, `filter_articles()` is applied before writing the briefing. Non-financial articles are dropped. `seen_urls` is updated for ALL fetched articles (including filtered-out ones) so non-financial articles are not re-fetched on the next run.
+
+2. **Nitter RSS** — 10 curated financial Twitter accounts added via `NITTER_FEEDS`. `NITTER_ENABLED = True` flag at top of file toggles all Nitter feeds without code changes. Nitter articles go through the relevance filter (same pass as RSS). Each feed failure is caught silently per-feed.
+
+3. **FT and Bloomberg** — added to `RSS_FEEDS`: FT Markets (`ft.com/rss/home/uk`) and Bloomberg Markets (`feeds.bloomberg.com/markets/news.rss`). These go through the relevance filter.
+
+4. **Central bank feeds** — `CENTRAL_BANK_FEEDS` list: Federal Reserve (`federalreserve.gov/feeds/press_all.xml`), ECB (`ecb.europa.eu/rss/press.html`), BoE (`bankofengland.co.uk/rss/news`). These are fetched AFTER the filter step and bypass it entirely. Each article is tagged `source_type: "central_bank"` in the dict. The briefing labels them `[CENTRAL BANK] {source}` so downstream processing can weight them appropriately.
+
+### Architecture decisions
+- **Two-pass structure in `fetch()`**: general articles are collected first and filtered as a batch; central bank articles are collected after and concatenated without filtering. This keeps the logic simple and ensures CB articles can never be accidentally dropped.
+- **`filter_articles()` is a pure module** — no Flask dependency, standalone. Can be imported from any script without bringing up the app context.
+- **Substring matching, not word boundaries** — simple and fast. Accepted false positive: common substrings like "golden" matching "gold". For a financial news pipeline, false positives are preferable to false negatives.
+- **All fetched articles marked seen** — filtered-out non-financial articles are added to `seen_urls` so they don't get re-fetched and re-rejected every 30 minutes.
+- **`NITTER_ENABLED` flag** — nitter.net is a third-party public instance that can go down. Toggling `NITTER_ENABLED = False` disables all 10 Nitter feeds in one change without touching the list.
+- **Central bank feeds are low-volume** — Fed/ECB/BoE typically publish 0-5 items per day. No rate limiting needed.
+
+### Gotchas for next session
+- **Nitter instances may go down** — if nitter.net is unavailable, all 10 Nitter feeds will silently return empty (logged as warnings). Set `NITTER_ENABLED = False` if this is causing log noise.
+- **FT and Bloomberg may return 403** — FT especially restricts RSS access by IP. The feed failure will be caught and logged as a warning; the rest of the fetch continues unaffected.
+- **Over-filtering warning** — if briefings become very short (< 10 articles on a busy news day), expand `FINANCIAL_TERMS` in `news_relevance_filter.py`. Common false negatives would be: geopolitical articles, central bank speeches (but those come from CB feeds which bypass the filter), and sector news using company names not in the whitelist (e.g. "Nvidia" doesn't appear in FINANCIAL_TERMS — add it).
+- **Under-filtering warning** — substring matching means short terms like "gold" match "golden", "fund" matches "fundamental". This is acceptable in a financial news context. If clearly non-financial articles are appearing in briefings, review recent filtered-out article titles in the logs.
+- **`source_type: "central_bank"` key** — only present on CB articles. Downstream code checking this field should use `.get('source_type') == 'central_bank'` not `['source_type']`.
+- **Deploy is manual** — both files must be copied + container restarted.
+
+### New files
+| Path | Purpose |
+|------|---------|
+| `backend/scripts/news_relevance_filter.py` | Keyword-whitelist financial relevance filter |
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/news_fetcher.py` | Filter integration; Nitter feeds + NITTER_ENABLED flag; FT + Bloomberg in RSS_FEEDS; CENTRAL_BANK_FEEDS; source_type tagging; seen_urls covers filtered-out articles |
+
+### Setup needed
+```bash
+docker cp backend/scripts/news_fetcher.py mirofish-offline:/app/backend/scripts/news_fetcher.py
+docker cp backend/scripts/news_relevance_filter.py mirofish-offline:/app/backend/scripts/news_relevance_filter.py
+docker restart mirofish-offline
+```
+(Already deployed in this session.)
+---
+
+## Session: 2026-04-11 — spaCy NER Replaces LLM-Based Entity Extraction
+
+### What was built
+Replaced the LLM-based NER pipeline in `backend/scripts/incremental_update.py` with spaCy `en_core_web_sm`. The previous pipeline called Ollama once per text chunk; at 2160 chunks this blocked the hourly pipeline for 6–8 hours. The new pipeline runs entirely in-process with no LLM calls and completes in under 2 minutes.
+
+### Architecture decisions
+- **spaCy model loaded at module level** — `nlp = spacy.load("en_core_web_sm")` runs once on import. Avoids cold-start overhead on every call.
+- **Label mapping**: `ORG→Company`, `PERSON→Person`, `GPE→Location`, `FAC→Location`, `MONEY→FinancialFigure`, `PERCENT→FinancialFigure`, `PRODUCT→Product`, `EVENT→Event`, `NORP→Group`. Labels not in the map are silently ignored.
+- **Entity filters**: name must be ≥2 characters and not purely numeric (`"2024"` is dropped; `"$82B"` is kept).
+- **Two-phase deduplication**: within-chunk dedup by (name.lower(), type) in `extract_entities_spacy()`; then global dedup across all chunks via a dict keyed on (name.lower(), type) in `process_briefing()`.
+- **Batched Neo4j writes via UNWIND** (`BATCH_SIZE=500`) — all entities collected first, then written in a single session with batched UNWIND queries. The old code opened a driver session per chunk and did one MERGE per entity.
+- **`is_synthetic` guard preserved** — ON MATCH SET uses `CASE WHEN n.is_synthetic THEN ... ELSE ... END` so agent nodes are never overwritten by briefing NER.
+- **`central_bank_source` property** — schema and UNWIND logic are in place; OR-logic means once set to `true` it is never cleared. However, the current briefing `.txt` format does not expose per-chunk source metadata, so all entities arrive with `central_bank_source=false`. Tag becomes live when chunk-level source_type metadata is added.
+- **Relation extraction dropped** — spaCy NER does not extract entity-to-entity relations. The `RELATION` edges from the old LLM pipeline are no longer created by `incremental_update.py`. The `NERExtractor` class and `EmbeddingService` are no longer imported by this script.
+- **Logging is per-batch** — three INFO lines total: entities extracted count, entities merged count, elapsed time. No per-chunk logs.
+
+### Blockers / incomplete items
+- `central_bank_source` tagging requires chunk-level source metadata that doesn't exist in the current briefing format. The briefing is a flat `.txt` concatenation; article SOURCE lines are in the text but not exposed to the splitter.
+- Relation extraction is gone. If entity→entity relations are needed in the graph, a separate RE step (dependency parsing, coref, or a lightweight model) would need to be added.
+
+### Gotchas for next session
+- **spaCy must be installed in the container** before deploying — if missing, `incremental_update.py` fails on import:
+  ```bash
+  docker exec mirofish-offline pip install spacy
+  docker exec mirofish-offline python -m spacy download en_core_web_sm
+  ```
+- **`requirements.txt` updated** — added `spacy>=3.7.0` and the `en_core_web_sm-3.7.1` wheel URL. Docker image rebuild will install these automatically.
+- **`NERExtractor` is not imported** — `ner_extractor.py` still exists in `backend/app/storage/` but is no longer called from `incremental_update.py`. Do not re-add the import.
+- **Ontology query removed** — the old code fetched the graph ontology from Neo4j and passed it to the LLM for guidance. spaCy doesn't use ontologies; that query is gone. The ontology node in Neo4j is unaffected.
+- **No embeddings generated** — entity embeddings (`EmbeddingService.embed_batch`) are no longer created in this script. Entities land in Neo4j with no `embedding` property. If vector similarity search on entities is needed, a separate embedding pass would be required.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/incremental_update.py` | Full rewrite — spaCy NER, batched UNWIND writes, dropped LLM/embedding calls |
+| `backend/requirements.txt` | Added `spacy>=3.7.0` and `en_core_web_sm-3.7.1` wheel |
+| `CLAUDE.md` | Added NER/Knowledge Graph Gotchas section |
+
+---
+
+## Session: 2026-04-11 — Nitter + Bloomberg Feed Timeout Guards
+
+### What was built
+Added per-feed timeouts to `backend/scripts/news_fetcher.py` to prevent Nitter and Bloomberg from hanging the news fetch indefinitely.
+
+### Changes made
+1. **`parse_feed()` gained a `timeout` parameter** — when set, the feed URL is pre-fetched via `requests.get(url, timeout=N)` before handing content to feedparser. A `requests.exceptions.Timeout` logs `WARNING: <source_name> timed out` and returns `[]`. Other request errors also return `[]` (logged as WARNING with the exception). When `timeout=None` (the default), feedparser fetches the URL directly, preserving existing behaviour for all other feeds.
+
+2. **Nitter feeds: `timeout=5`** — all 10 feeds in the `NITTER_FEEDS` loop now pass `timeout=5`. Public Nitter instances can hang indefinitely; 5 seconds is enough to confirm a live instance.
+
+3. **Bloomberg Markets: `timeout=5`** — Bloomberg was producing 0 articles consistently with no log output, consistent with a silent hang. The loop over `RSS_FEEDS` now checks `if source_name == "Bloomberg Markets"` and passes `timeout=5`.
+
+### Architecture decisions
+- **Pre-fetch via requests, then pass content to feedparser** — feedparser's internal URL fetch has no timeout API. The cleanest workaround is: fetch with requests (timeout enforced), pass `resp.text` to `feedparser.parse()`. feedparser accepts raw XML/HTML string input directly.
+- **`timeout=None` default** — all other feeds (Reuters, Yahoo Finance, CNBC, MarketWatch, FT, central banks) keep their existing no-timeout behaviour. Only Bloomberg and Nitter are explicitly guarded.
+- **WARNING log on timeout** — the log message is `"{source_name} timed out"` (no URL) to match the brevity of the existing `Feed '{source_name}' failed: {e}` pattern.
+
+### Gotchas for next session
+- **Bloomberg timeout may suppress all Bloomberg articles** — if Bloomberg's feed is consistently slow (>5s) rather than hanging, reducing to 5s will always produce 0 articles. If Bloomberg starts consistently timing out, bump its timeout to 10–15s or add it to a separate `SLOW_FEEDS` list.
+- **feedparser receives `resp.text`, not the URL** — when timeout is set, feedparser never sees the original URL. This means feedparser's `bozo` detection for malformed feeds may trigger differently than when fetching directly. In practice this is not an issue, but worth noting.
+- **Central bank feeds have no timeout guard** — they are low-volume, high-priority, and on reliable government infrastructure. No change made.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/news_fetcher.py` | `parse_feed()` gained `timeout` param; Nitter loop passes `timeout=5`; Bloomberg passes `timeout=5` |
+
+### Setup needed
+```bash
+docker cp backend/scripts/news_fetcher.py mirofish-offline:/app/backend/scripts/news_fetcher.py
+docker restart mirofish-offline
+```
+(Already deployed in this session.)
+
+---
+
+### Setup needed
+```bash
+# Install spaCy in running container
+docker exec mirofish-offline pip install spacy
+docker exec mirofish-offline python -m spacy download en_core_web_sm
+
+# Deploy updated script
+docker cp backend/scripts/incremental_update.py mirofish-offline:/app/backend/scripts/incremental_update.py
+docker restart mirofish-offline
+```
+
+---
+
+## Session: 2026-04-11 — Nitter Disabled + Bloomberg Removed + Three Replacement RSS Feeds
+
+### What was built
+Three targeted changes to `backend/scripts/news_fetcher.py` to fix zero-article fetches from dead sources and replace them with working alternatives.
+
+### Changes made
+1. **`NITTER_ENABLED = False`** — all public nitter.net instances are timing out on every request and producing zero articles. Disabled at the flag level so no individual feed changes are needed.
+
+2. **Bloomberg Markets removed from `RSS_FEEDS`** — was returning 403 on all server-side requests. Will never produce articles without browser-like headers or authentication. Left a comment: `# Bloomberg removed — 403 on server requests, replace with authenticated source if needed`.
+
+3. **Three replacement feeds added to `RSS_FEEDS`** (all with 5-second timeout via `_TIMEOUT_FEEDS` set):
+   - **Unusual Whales** (`unusualwhales.com/rss/news`) — options flow and retail sentiment
+   - **Benzinga** (`benzinga.com/feeds/news`) — real-time financial news
+   - **Seeking Alpha** (`seekingalpha.com/market_currents.xml`) — market commentary and analysis
+
+4. **Timeout logic updated** — `Bloomberg Markets` condition replaced with `_TIMEOUT_FEEDS = {"Unusual Whales", "Benzinga", "Seeking Alpha"}`. All three new feeds use `timeout=5` to guard against slow responses.
+
+### Architecture decisions
+- **5-second timeout on all three new feeds** — third-party aggregator feeds are less reliable than primary wires (Reuters, AP). The `_TIMEOUT_FEEDS` set pattern is cleaner than individual name checks as the list grows.
+- **Same fetch pattern as existing feeds** — parse_feed → WARNING log on timeout → continue. No special error handling.
+- **NITTER_FEEDS list preserved** — the list stays in the file for when self-hosted Nitter in Docker is ready. Only the flag changes.
+
+### Gotchas for next session
+- **Nitter re-enable path**: set `NITTER_ENABLED = True` in `news_fetcher.py` once self-hosted Nitter is running in Docker. The feed list is already configured; no other changes needed.
+- **Seeking Alpha may throttle** — `seekingalpha.com` is known to block automated fetches with 429s on some IPs. If it produces 0 articles consistently, it may need a User-Agent rotation or removal.
+- **Unusual Whales RSS is unofficial** — the feed URL is community-documented. If it 404s in a future session, check whether the feed has moved or been removed.
+- **Bloomberg replacement** — the comment in RSS_FEEDS notes to replace with an authenticated source. Options: Bloomberg API (paid), RapidAPI Bloomberg proxy, or a different business wire (AP Business, PR Newswire).
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/news_fetcher.py` | `NITTER_ENABLED = False`; Bloomberg removed; Unusual Whales + Benzinga + Seeking Alpha added; `_TIMEOUT_FEEDS` set replaces Bloomberg-specific timeout check; module docstring updated |
+
+### Setup needed
+```bash
+docker cp backend/scripts/news_fetcher.py mirofish-offline:/app/backend/scripts/news_fetcher.py
+docker restart mirofish-offline
+```
+(Already deployed in this session.)
+
+---
+
+## Session: 2026-04-11 — Feed Corrections: Benzinga URL Fix + Unusual Whales Removed + Investopedia/TheStreet Added
+
+### What was built
+Three targeted corrections to `backend/scripts/news_fetcher.py` to fix two 404-returning feeds.
+
+### Changes made
+1. **Benzinga URL corrected** — old URL `benzinga.com/feeds/news` was returning 404. Replaced with `benzinga.com/latest?page=1&feed=rss`. Label and 5-second timeout unchanged.
+
+2. **Unusual Whales removed** — `unusualwhales.com/rss/news` returns 404 because Unusual Whales does not publish a public RSS feed; access requires their paid API. Removed the entry and left a comment: `# Unusual Whales removed — no public RSS feed, requires paid API`.
+
+3. **Two free replacement feeds added** (both with 5-second timeout via `_TIMEOUT_FEEDS`):
+   - **Investopedia** (`investopedia.com/feedbuilder/feed/getfeed/?feedName=rss_headline`) — financial news and market coverage
+   - **TheStreet** (`thestreet.com/feeds/rss/index.xml`) — market commentary and stock analysis
+
+4. **`_TIMEOUT_FEEDS` updated** — removed `"Unusual Whales"`, added `"Investopedia"` and `"TheStreet"`. Set is now `{"Benzinga", "Seeking Alpha", "Investopedia", "TheStreet"}`.
+
+5. **Module docstring updated** — reflects current feed list.
+
+### Gotchas for next session
+- **Investopedia leans educational** — many articles are glossary/explainer style. The relevance filter should catch financially-relevant ones; pure definitions may pass through if they contain enough financial terms. Monitor briefing quality.
+- **Seeking Alpha may throttle (429)** — flagged in previous session. Still in the feed list; remove if it consistently produces 0 articles.
+- **Benzinga new URL is the paginated latest feed** — `?page=1` returns the most recent items. If Benzinga restructures their URL scheme this may break again.
+- **Bloomberg replacement still open** — comment remains in RSS_FEEDS.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/news_fetcher.py` | Benzinga URL corrected; Unusual Whales removed with comment; Investopedia + TheStreet added; `_TIMEOUT_FEEDS` updated; module docstring and fetch() comment updated |
+
+### Setup needed
+```bash
+docker cp backend/scripts/news_fetcher.py mirofish-offline:/app/backend/scripts/news_fetcher.py
+docker restart mirofish-offline
+```
+(Already deployed in this session.)
+
+---
+
+## Session: 2026-04-11 — Feed Removals: Investopedia (402) + TheStreet (403)
+
+### What was built
+Two feed removals from `backend/scripts/news_fetcher.py` to clear out sources that cannot serve content to server-side requests.
+
+### Changes made
+1. **Investopedia removed** — returns 402 Payment Required on all server-side requests. The RSS feed is paywalled. Comment added: `# Investopedia removed — 402 Payment Required, paywalled`.
+
+2. **TheStreet removed** — `thestreet.com/feeds/rss/index.xml` (the alternative URL) was tested via `curl` and returns 403, same as the original `thestreet.com/rss/index.xml`. No working public RSS URL found. Comment added: `# TheStreet removed — could not find working RSS URL`.
+
+3. **`_TIMEOUT_FEEDS` reduced** — now only `{"Benzinga", "Seeking Alpha"}`. Investopedia and TheStreet removed from the set.
+
+4. **Module docstring updated** — reflects current feed list (Reuters, Yahoo Finance, CNBC Markets, MarketWatch, FT Markets, Benzinga, Seeking Alpha).
+
+### Current active general RSS feeds
+Reuters, Yahoo Finance, CNBC Markets, MarketWatch, FT Markets, Benzinga, Seeking Alpha.
+
+### Gotchas for next session
+- **Seeking Alpha may throttle (429)** — flagged in two prior sessions. Still in the feed list; remove if it consistently produces 0 articles.
+- **Benzinga URL is paginated** — `benzinga.com/latest?page=1&feed=rss`. If it breaks again, check whether Benzinga has moved their RSS endpoint.
+- **Feed expansion needed** — with Bloomberg, Unusual Whales, Investopedia, and TheStreet all dead, the general RSS tier is now down to 7 sources. Consider AP Business (`apnews.com/hub/business/feed`), PR Newswire, or Reuters Business as alternatives.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/news_fetcher.py` | Investopedia removed with comment; TheStreet removed with comment; `_TIMEOUT_FEEDS` updated; module docstring updated; fetch() comment updated |
+
+### Setup needed
+```bash
+docker cp backend/scripts/news_fetcher.py mirofish-offline:/app/backend/scripts/news_fetcher.py
+docker restart mirofish-offline
+```
+(Already deployed in this session.)
+
+---
+
+## Session: 2026-04-11 — Feed Addition: AP Business
+
+### What was built
+Added AP Business RSS to `RSS_FEEDS` in `backend/scripts/news_fetcher.py`.
+
+### Changes made
+1. **AP Business added** — `apnews.com/hub/business/feed`. No paywall, reliable AP infrastructure, no timeout guard needed. Appended after the Investopedia/TheStreet removal comments.
+2. **Module docstring updated** — AP Business added to the General RSS list.
+
+### Architecture decisions
+- **No timeout** — AP is primary wire infrastructure, not a third-party aggregator. Same treatment as Reuters, Yahoo Finance, CNBC, MarketWatch, FT.
+- **Not added to `_TIMEOUT_FEEDS`** — only Benzinga and Seeking Alpha carry the 5-second guard.
+
+### Current active general RSS feeds (8 total)
+Reuters, Yahoo Finance, CNBC Markets, MarketWatch, FT Markets, Benzinga, Seeking Alpha, AP Business.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/news_fetcher.py` | AP Business entry added to `RSS_FEEDS`; module docstring updated |
+
+### Setup needed
+```bash
+docker cp backend/scripts/news_fetcher.py mirofish-offline:/app/backend/scripts/news_fetcher.py
+docker restart mirofish-offline
+```
+(Already deployed in this session.)

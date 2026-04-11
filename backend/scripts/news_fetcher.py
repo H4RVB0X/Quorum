@@ -1,11 +1,24 @@
 """
-news_fetcher.py — Poll RSS feeds and write a MiroFish briefing .txt file.
+news_fetcher.py — Poll RSS feeds and write a Quorum briefing .txt file.
 
-Feeds:
-  - Reuters Top News
-  - Yahoo Finance
-  - CNBC Markets
-  - MarketWatch Top Stories
+Feeds (in order of processing):
+  General RSS (relevance-filtered):
+    - Reuters Top News
+    - Yahoo Finance
+    - CNBC Markets
+    - MarketWatch Top Stories
+    - FT Markets
+    - Benzinga
+    - Seeking Alpha
+    - AP Business
+  Nitter (relevance-filtered; toggled by NITTER_ENABLED):
+    - 10 curated financial Twitter accounts via nitter.net
+    - Disabled by default (NITTER_ENABLED = False) — public instances unreliable.
+      Re-enable only when self-hosted Nitter is running in Docker.
+  Central bank (never filtered; tagged [CENTRAL BANK] in briefing):
+    - Federal Reserve press releases
+    - ECB press releases
+    - Bank of England news
 
 Usage:
   python news_fetcher.py          # writes to ../briefings/YYYY-MM-DD_HHMM.txt
@@ -23,6 +36,7 @@ from typing import Optional
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from app.utils.logger import get_logger
+from news_relevance_filter import filter_articles
 
 import feedparser
 import requests
@@ -30,11 +44,50 @@ from bs4 import BeautifulSoup
 
 logger = get_logger('mirofish.news_fetcher')
 
+# ---------------------------------------------------------------------------
+# Feed configuration
+# ---------------------------------------------------------------------------
+
 RSS_FEEDS = [
-    ("Reuters",     "https://feeds.reuters.com/reuters/topNews"),
-    ("Yahoo Finance", "https://finance.yahoo.com/rss/topstories"),
-    ("CNBC Markets",  "https://www.cnbc.com/id/15839069/device/rss/rss.html"),
-    ("MarketWatch",   "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
+    ("Reuters",        "https://feeds.reuters.com/reuters/topNews"),
+    ("Yahoo Finance",  "https://finance.yahoo.com/rss/topstories"),
+    ("CNBC Markets",   "https://www.cnbc.com/id/15839069/device/rss/rss.html"),
+    ("MarketWatch",    "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
+    ("FT Markets",     "https://www.ft.com/rss/home/uk"),
+    # Bloomberg removed — 403 on server requests, replace with authenticated source if needed
+    # Unusual Whales removed — no public RSS feed, requires paid API
+    ("Benzinga",      "https://www.benzinga.com/latest?page=1&feed=rss"),
+    ("Seeking Alpha", "https://seekingalpha.com/market_currents.xml"),
+    # Investopedia removed — 402 Payment Required, paywalled
+    # TheStreet removed — could not find working RSS URL
+    ("AP Business",  "https://apnews.com/hub/business/feed"),
+]
+
+# Set False to disable all Nitter feeds without code changes (e.g. if instances go down).
+# Currently disabled — public nitter.net instances are timing out on every request.
+# Re-enable only when self-hosted Nitter is running in Docker.
+NITTER_ENABLED = False
+
+NITTER_FEEDS = [
+    ("Nitter/@unusual_whales",  "https://nitter.net/unusual_whales/rss"),
+    ("Nitter/@DeItaone",        "https://nitter.net/DeItaone/rss"),
+    ("Nitter/@financialjuice",  "https://nitter.net/financialjuice/rss"),
+    ("Nitter/@WallStreetSilv",  "https://nitter.net/WallStreetSilv/rss"),
+    ("Nitter/@zerohedge",       "https://nitter.net/zerohedge/rss"),
+    ("Nitter/@markets",         "https://nitter.net/markets/rss"),
+    ("Nitter/@bespokeinvest",   "https://nitter.net/bespokeinvest/rss"),
+    ("Nitter/@elerianm",        "https://nitter.net/elerianm/rss"),
+    ("Nitter/@NorthmanTrader",  "https://nitter.net/NorthmanTrader/rss"),
+    ("Nitter/@ReformedBroker",  "https://nitter.net/ReformedBroker/rss"),
+]
+
+# Low-volume, high-signal feeds — never relevance-filtered.
+# Every item from a central bank is financially relevant by definition.
+# Articles are tagged source_type: "central_bank" for downstream weighting.
+CENTRAL_BANK_FEEDS = [
+    ("Federal Reserve", "https://www.federalreserve.gov/feeds/press_all.xml"),
+    ("ECB",             "https://www.ecb.europa.eu/rss/press.html"),
+    ("Bank of England", "https://www.bankofengland.co.uk/rss/news"),
 ]
 
 BRIEFINGS_DIR = Path(__file__).parent.parent / "briefings"
@@ -59,8 +112,8 @@ def load_seen_urls() -> dict:
 
 
 def prune_seen_urls(seen: dict) -> dict:
-    # Timestamps are always stored as UTC ISO strings (e.g. "2026-04-09T12:00:00+00:00")
-    # so lexicographic comparison is equivalent to chronological comparison.
+    # Timestamps are always stored as UTC ISO strings so lexicographic comparison
+    # is equivalent to chronological comparison.
     cutoff = (datetime.now(timezone.utc) - timedelta(days=URL_TTL_DAYS)).isoformat()
     return {h: ts for h, ts in seen.items() if ts > cutoff}
 
@@ -108,13 +161,31 @@ def fetch_body(url: str, rss_summary: str = "") -> str:
 # Feed parsing
 # ---------------------------------------------------------------------------
 
-def parse_feed(source_name: str, feed_url: str, seen: dict) -> list:
+def parse_feed(source_name: str, feed_url: str, seen: dict, source_type: str = "", timeout: Optional[int] = None) -> list:
     """
     Parse a single RSS feed. Returns list of new article dicts.
-    Any exception is caught — returns empty list on failure.
+    Any exception is caught — returns empty list on failure (dead feeds are non-fatal).
+
+    source_type: optional tag added to each article (e.g. "central_bank").
+                 Downstream code uses this to weight or label articles.
+    timeout: if set, the feed URL is pre-fetched via requests with this timeout
+             (seconds). A Timeout exception logs a WARNING and returns [].
+             If None, feedparser fetches the URL directly (no enforced timeout).
     """
     try:
-        parsed = feedparser.parse(feed_url)
+        if timeout is not None:
+            try:
+                resp = requests.get(feed_url, timeout=timeout, headers={"User-Agent": "MiroFish/1.0"})
+                resp.raise_for_status()
+                parsed = feedparser.parse(resp.text)
+            except requests.exceptions.Timeout:
+                logger.warning(f"{source_name} timed out")
+                return []
+            except Exception as e:
+                logger.warning(f"Feed '{source_name}' failed: {e} — skipping")
+                return []
+        else:
+            parsed = feedparser.parse(feed_url)
         articles = []
         for entry in parsed.entries:
             link = getattr(entry, 'link', '')
@@ -128,13 +199,16 @@ def parse_feed(source_name: str, feed_url: str, seen: dict) -> list:
             title = getattr(entry, 'title', 'Untitled')
 
             body = fetch_body(link, rss_summary=summary)
-            articles.append({
+            article = {
                 'title': title,
                 'source': source_name,
                 'url': link,
                 'hash': h,
                 'body': body,
-            })
+            }
+            if source_type:
+                article['source_type'] = source_type
+            articles.append(article)
 
         logger.info(f"{source_name}: {len(articles)} new articles")
         return articles
@@ -152,8 +226,11 @@ def write_briefing(articles: list, output_path: Path) -> None:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
     lines = [f"MIROFISH BRIEFING — {now_str}\n{'='*60}\n"]
     for art in articles:
+        source_label = art['source']
+        if art.get('source_type') == 'central_bank':
+            source_label = f"[CENTRAL BANK] {source_label}"
         lines.append(f"HEADLINE: {art['title']}")
-        lines.append(f"SOURCE: {art['source']}")
+        lines.append(f"SOURCE: {source_label}")
         lines.append(f"URL: {art['url']}")
         lines.append("")
         lines.append(art['body'])
@@ -168,18 +245,52 @@ def write_briefing(articles: list, output_path: Path) -> None:
 
 def fetch(dry_run: bool = False) -> Optional[Path]:
     """
-    Poll all feeds, deduplicate, write briefing.
-    Returns Path to briefing file, or None if no new articles.
+    Poll all feeds, deduplicate, apply relevance filter to general feeds,
+    write briefing. Returns Path to briefing file, or None if no new articles.
+
+    Processing order:
+      1. General RSS feeds → relevance filter
+      2. Nitter feeds (if enabled) → relevance filter (same pass)
+      3. Central bank feeds → bypass filter, tag as central_bank
+      4. Write briefing with all surviving articles
+      5. Mark ALL fetched articles (including filtered-out) as seen so they
+         are not re-fetched on the next run.
     """
     seen = load_seen_urls()
-    all_articles = []
 
+    # --- General RSS feeds ---
+    # Benzinga and Seeking Alpha use a 5-second timeout: third-party aggregator feeds
+    # can hang silently without an explicit timeout guard.
+    _TIMEOUT_FEEDS = {"Benzinga", "Seeking Alpha"}
+    general_articles: list = []
     for source_name, feed_url in RSS_FEEDS:
-        articles = parse_feed(source_name, feed_url, seen)
-        all_articles.extend(articles)
+        feed_timeout = 5 if source_name in _TIMEOUT_FEEDS else None
+        general_articles.extend(parse_feed(source_name, feed_url, seen, timeout=feed_timeout))
+
+    # --- Nitter feeds (toggled by flag) ---
+    # 5-second per-feed timeout: public Nitter instances can hang indefinitely.
+    if NITTER_ENABLED:
+        for source_name, feed_url in NITTER_FEEDS:
+            general_articles.extend(parse_feed(source_name, feed_url, seen, timeout=5))
+
+    # --- Apply relevance filter to all general + social feeds ---
+    filtered_articles = filter_articles(general_articles)
+
+    # --- Central bank feeds — never filtered, always tagged ---
+    cb_articles: list = []
+    for source_name, feed_url in CENTRAL_BANK_FEEDS:
+        cb_articles.extend(parse_feed(source_name, feed_url, seen, source_type="central_bank"))
+
+    all_articles = filtered_articles + cb_articles
 
     if not all_articles:
         logger.info("No new articles found.")
+        # Still mark general articles as seen to avoid re-fetching on next run
+        if general_articles or cb_articles:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for art in general_articles + cb_articles:
+                seen[art['hash']] = now_iso
+            save_seen_urls(seen)
         return None
 
     # Write briefing
@@ -188,15 +299,20 @@ def fetch(dry_run: bool = False) -> Optional[Path]:
 
     if dry_run:
         for art in all_articles:
-            print(f"\n--- {art['source']}: {art['title']} ---\n{art['body'][:200]}...")
+            tag = " [CENTRAL BANK]" if art.get('source_type') == 'central_bank' else ""
+            print(f"\n--- {art['source']}{tag}: {art['title']} ---\n{art['body'][:200]}...")
         return None
 
     write_briefing(all_articles, output_path)
-    logger.info(f"Briefing written: {output_path} ({len(all_articles)} articles)")
+    logger.info(
+        f"Briefing written: {output_path} "
+        f"({len(all_articles)} articles — {len(filtered_articles)} general, {len(cb_articles)} central bank)"
+    )
 
-    # Update seen-URL store (after briefing is safely on disk)
+    # Update seen-URL store with ALL fetched articles (including filtered-out ones)
+    # so non-financial articles are not re-fetched on the next run.
     now_iso = datetime.now(timezone.utc).isoformat()
-    for art in all_articles:
+    for art in general_articles + cb_articles:
         seen[art['hash']] = now_iso
     save_seen_urls(seen)
 
@@ -204,7 +320,7 @@ def fetch(dry_run: bool = False) -> Optional[Path]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fetch RSS news and write MiroFish briefing")
+    parser = argparse.ArgumentParser(description="Fetch RSS news and write Quorum briefing")
     parser.add_argument('--dry-run', action='store_true', help="Print to stdout, don't write file")
     args = parser.parse_args()
     fetch(dry_run=args.dry_run)

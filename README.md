@@ -17,7 +17,7 @@ This project is built on top of [MiroFish-Offline](https://github.com/nikmcfly/M
 Every 30 minutes, an autonomous pipeline:
 
 1. Fetches headlines from Reuters, Yahoo Finance, CNBC, and MarketWatch
-2. Extracts named entities and relationships via a local LLM and merges them into a Neo4j knowledge graph
+2. Extracts named entities via spaCy (`en_core_web_sm`) and merges them into a Neo4j knowledge graph
 3. Samples 500 agents, retrieves the most relevant news chunks for each via cosine similarity, and runs a per-agent LLM call to generate a `buy / sell / hold / panic / hedge` reaction in character
 4. Writes each reaction as a `MemoryEvent` node in Neo4j, linked to the agent
 5. Fetches daily closing prices for 7 asset-class proxies
@@ -37,7 +37,7 @@ The resulting sentiment scores — weighted by agent capital and conviction — 
 └──────┬─────────────────────┬───────────────────────┬────────────┘
        │                     │                       │
   news_fetcher.py    incremental_update.py    simulation_tick.py
-  (RSS → briefing)   (NER → Neo4j MERGE)      (LLM per-agent)
+  (RSS → briefing)   (spaCy NER → Neo4j)      (LLM per-agent)
        │                     │                       │
        └─────────────────────┴───────────────────────┘
                              │
@@ -71,7 +71,8 @@ The resulting sentiment scores — weighted by agent capital and conviction — 
 | Embeddings | Ollama (`nomic-embed-text`, 768-dimensional) |
 | Vector similarity | NumPy cosine similarity |
 | Scheduler | APScheduler (BlockingScheduler) |
-| News ingestion | feedparser + requests + BeautifulSoup |
+| NER | spaCy `en_core_web_sm` |
+| News ingestion | feedparser + requests + BeautifulSoup (requests used as a pre-fetch wrapper for feeds that require timeout enforcement, since feedparser has no native timeout API) |
 | Market prices | yfinance |
 | Frontend | Custom HTML dashboard served by Flask |
 | Containerisation | Docker Compose |
@@ -124,11 +125,19 @@ Agents are bulk-inserted in batches of 500 using Cypher `UNWIND`. A fixed RNG se
 
 ### News Fetching
 
-Polls RSS feeds from Reuters, Yahoo Finance, CNBC, and MarketWatch every 30 minutes. Each article URL is SHA-256 hashed and checked against a deduplication store (30-day TTL). New articles are fetched and scraped via BeautifulSoup; the result is written as a timestamped briefing file.
+Polls three tiers of feeds every 30 minutes:
+
+- **General RSS** (relevance-filtered): Reuters, Yahoo Finance, CNBC Markets, MarketWatch, FT Markets, Benzinga, Seeking Alpha, AP Business
+- **Nitter RSS** (relevance-filtered; toggled by `NITTER_ENABLED`): 10 curated financial Twitter accounts via nitter.net — `@unusual_whales`, `@DeItaone`, `@financialjuice`, `@WallStreetSilv`, `@zerohedge`, `@markets`, `@bespokeinvest`, `@elerianm`, `@NorthmanTrader`, `@ReformedBroker`. **Currently disabled** (`NITTER_ENABLED = False`) — public nitter.net instances are unreliable. Re-enable when self-hosted Nitter is running in Docker.
+- **Central bank** (never filtered; tagged `[CENTRAL BANK]` in briefing): Federal Reserve, ECB, Bank of England press releases
+
+Benzinga and Seeking Alpha are fetched with a **5-second timeout** enforced via `requests.get()` — feedparser has no native timeout API, so a `requests` pre-fetch is used as a workaround. On timeout, a WARNING is logged and that feed is skipped without blocking the rest of the run. All other feeds use feedparser's default fetch.
+
+Each article URL is SHA-256 hashed and checked against a deduplication store (30-day TTL). New articles are fetched and scraped via BeautifulSoup. General and Nitter articles are passed through a keyword-whitelist relevance filter (`news_relevance_filter.py`) before being written to the briefing; central bank articles bypass the filter entirely. The result is written as a timestamped briefing file.
 
 ### Knowledge Graph Update
 
-Chunks each briefing, runs NER extraction via the local LLM, and MERGEs entities and relationships into Neo4j. A `CASE WHEN is_synthetic` guard in the Cypher prevents news-extracted entities from ever overwriting synthetic agent node properties — so a news article mentioning "Tesla" can't corrupt an agent node that happens to share a lowercased name.
+Chunks each briefing and runs spaCy (`en_core_web_sm`) NER to extract named entities — organisations, people, locations, financial figures, and more — then batch-MERGEs them into Neo4j via `UNWIND` in batches of 500. No LLM calls are made during this step; the full pipeline completes in under 2 minutes regardless of briefing length. A `CASE WHEN is_synthetic` guard in the Cypher prevents news-extracted entities from ever overwriting synthetic agent node properties — so a news article mentioning "Tesla" can't corrupt an agent node that happens to share a lowercased name.
 
 ### Simulation Tick
 
@@ -224,7 +233,7 @@ Quorum/
 │   │   ├── storage/
 │   │   │   ├── neo4j_storage.py      # Neo4j implementation (hybrid search: 0.7 vector + 0.3 BM25)
 │   │   │   ├── embedding_service.py  # nomic-embed-text via Ollama
-│   │   │   └── ner_extractor.py      # Local LLM NER/RE extraction
+│   │   │   └── ner_extractor.py      # LLM-based NER (superseded by spaCy in incremental_update.py)
 │   │   └── services/
 │   │       ├── simulation_runner.py
 │   │       ├── graph_builder.py
