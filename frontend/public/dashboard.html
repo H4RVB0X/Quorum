@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiroFish — Market Intelligence</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#080b0f;--surface:#0d1117;--surface2:#161b22;--border:#21262d;
+  --green:#39d353;--green-dim:#1a6b28;--amber:#e3b341;--amber-dim:#6b4c10;
+  --red:#f85149;--red-dim:#3a1a1a;--blue:#58a6ff;--blue-dim:#1a2a3a;
+  --text:#e6edf3;--muted:#7d8590;--mono:'IBM Plex Mono',monospace;--sans:'IBM Plex Sans',sans-serif;
+}
+html,body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;min-height:100vh}
+
+/* ── Header ── */
+header{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;border-bottom:1px solid var(--border);background:var(--surface);position:sticky;top:0;z-index:100}
+.logo{font-family:var(--mono);font-size:13px;font-weight:600;letter-spacing:.08em;color:var(--green)}
+.logo span{color:var(--muted);font-weight:400}
+.hdr-right{display:flex;align-items:center;gap:16px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+.pulse{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;margin-right:6px;animation:pulse 2s infinite}
+.pulse.error{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.refresh-btn{background:none;border:1px solid var(--border);color:var(--muted);font-family:var(--mono);font-size:11px;padding:4px 10px;border-radius:4px;cursor:pointer;transition:border-color .15s,color .15s}
+.refresh-btn:hover{border-color:var(--green);color:var(--green)}
+
+.main{padding:20px 24px;max-width:1400px;margin:0 auto}
+
+/* ── Section label ── */
+.section-label{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:10px;padding-left:2px}
+
+/* ── Trading Signals ── */
+.signals-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:10px;margin-bottom:20px}
+.sig{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;border-top:3px solid var(--border);transition:border-top-color .3s}
+.sig.bullish{border-top-color:var(--green)}
+.sig.bearish{border-top-color:var(--red)}
+.sig.neutral{border-top-color:var(--muted)}
+.sig-asset{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:8px}
+.sig-signal{font-family:var(--mono);font-size:15px;font-weight:600;text-transform:uppercase;margin-bottom:6px}
+.sig-signal.bullish{color:var(--green)}
+.sig-signal.bearish{color:var(--red)}
+.sig-signal.neutral{color:var(--muted)}
+.sig-price{font-family:var(--mono);font-size:13px;font-weight:500;color:var(--text);margin-bottom:2px}
+.sig-change{font-family:var(--mono);font-size:11px}
+.sig-change.pos{color:var(--green)}
+.sig-change.neg{color:var(--red)}
+.sig-score{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:6px}
+
+/* ── Key stats row ── */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:20px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:14px 16px}
+.stat-label{font-family:var(--mono);font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px}
+.stat-value{font-family:var(--mono);font-size:22px;font-weight:600;color:var(--text)}
+.stat-sub{font-size:11px;color:var(--muted);margin-top:3px}
+.stat-value.green{color:var(--green)}
+
+/* ── Cards ── */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:16px;margin-bottom:16px}
+.card-title{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:14px}
+.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+.card-count{font-family:var(--mono);font-size:11px;color:var(--muted)}
+
+/* ── Chart grids ── */
+.grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:16px}
+.grid-2{display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:16px}
+.grid-1{margin-bottom:16px}
+.chart-wrap{position:relative;height:180px}
+.chart-wrap-lg{position:relative;height:220px}
+.chart-wrap-sm{position:relative;height:140px}
+
+/* ── Sentiment legend ── */
+.sent-legend{display:flex;gap:16px;margin-bottom:10px;font-family:var(--mono);font-size:10px;color:var(--muted);flex-wrap:wrap}
+.ldot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px}
+
+/* ── Fear/Greed ── */
+.fg-wrap{padding:16px 0}
+.fg-row{display:flex;align-items:center;gap:12px}
+.fg-track{flex:1;height:8px;border-radius:4px;background:linear-gradient(to right,#58a6ff,#e3b341,#f85149);position:relative}
+.fg-needle{position:absolute;top:-4px;width:2px;height:16px;background:white;border-radius:1px;transform:translateX(-50%);transition:left .5s ease}
+.fg-lbl{font-family:var(--mono);font-size:10px;color:var(--muted);white-space:nowrap}
+.fg-nums{display:flex;justify-content:space-between;margin-top:14px}
+.fg-num{font-family:var(--mono);font-size:20px;font-weight:600;text-align:center}
+
+/* ── History asset tabs ── */
+.asset-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.asset-tab{font-family:var(--mono);font-size:10px;padding:3px 10px;border-radius:3px;border:1px solid var(--border);background:none;color:var(--muted);cursor:pointer;transition:all .15s}
+.asset-tab.active,.asset-tab:hover{border-color:var(--blue);color:var(--blue);background:var(--blue-dim)}
+
+/* ── Memory events ── */
+.event{display:grid;grid-template-columns:80px 130px 64px 1fr 44px;gap:10px;align-items:start;padding:10px 0;border-bottom:1px solid var(--border);font-size:12px}
+.event:last-child{border-bottom:none}
+.ev-time{font-family:var(--mono);font-size:10px;color:var(--muted);line-height:1.4}
+.ev-agent{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ev-arch{font-size:10px;color:var(--muted);font-family:var(--mono)}
+.rbadge{font-family:var(--mono);font-size:10px;font-weight:600;padding:2px 8px;border-radius:3px;text-transform:uppercase;white-space:nowrap}
+.r-buy{background:#1a3a1a;color:var(--green)}
+.r-sell{background:var(--red-dim);color:var(--red)}
+.r-hold{background:#2a2a1a;color:var(--amber)}
+.r-panic{background:#3a1a2a;color:#f97583}
+.r-hedge{background:var(--blue-dim);color:var(--blue)}
+.ev-reason{color:var(--muted);font-size:11px;line-height:1.4}
+.ev-conf{font-family:var(--mono);font-size:11px;color:var(--muted);text-align:right}
+
+/* ── Agents table ── */
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);text-align:left;padding:6px 10px;border-bottom:1px solid var(--border)}
+td{padding:8px 10px;border-bottom:1px solid var(--border)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--surface2)}
+.risk-bar{display:flex;align-items:center;gap:6px}
+.risk-pip{height:4px;border-radius:2px}
+
+/* ── Archetype filter tabs ── */
+.arch-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.arch-tab{font-family:var(--mono);font-size:10px;padding:3px 10px;border-radius:3px;border:1px solid var(--border);background:none;color:var(--muted);cursor:pointer;transition:all .15s}
+.arch-tab.active,.arch-tab:hover{border-color:var(--green);color:var(--green);background:var(--green-dim)}
+
+/* ── Empty state ── */
+.empty{text-align:center;padding:40px 20px;color:var(--muted);font-family:var(--mono);font-size:12px}
+.empty-icon{font-size:28px;margin-bottom:10px;color:var(--border)}
+
+/* ── Responsive ── */
+@media(max-width:900px){
+  .grid-3{grid-template-columns:1fr 1fr}
+  .grid-2{grid-template-columns:1fr}
+}
+@media(max-width:600px){
+  .main{padding:12px}
+  header{padding:10px 12px;flex-wrap:wrap;gap:8px}
+  .hdr-right{font-size:10px;gap:10px}
+  .signals-grid{grid-template-columns:1fr 1fr}
+  .grid-3{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+  .stats-grid{grid-template-columns:1fr 1fr;gap:8px}
+  .stat-value{font-size:18px}
+  .event{grid-template-columns:1fr;gap:3px;padding:8px 0}
+  .ev-conf{text-align:left}
+  .card{overflow-x:auto}
+  table{min-width:560px}
+  .chart-wrap{height:150px}
+  .chart-wrap-lg{height:180px}
+  .chart-wrap-sm{height:110px}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">MIROFISH <span>/ MARKET INTELLIGENCE</span></div>
+  <div class="hdr-right">
+    <span><span class="pulse" id="pulse-dot"></span><span id="status-text">connecting...</span></span>
+    <span id="last-updated" style="display:none"></span>
+    <button class="refresh-btn" onclick="fetchAll()">↻ refresh</button>
+  </div>
+</header>
+
+<div class="main">
+
+  <!-- Trading Signals -->
+  <div class="section-label">Trading Signals — 24h sentiment</div>
+  <div class="signals-grid" id="signal-panel">
+    <div class="empty" style="grid-column:1/-1;padding:20px 0"><div class="empty-icon">◌</div>Loading signals...</div>
+  </div>
+
+  <!-- Key Stats -->
+  <div class="stats-grid">
+    <div class="stat">
+      <div class="stat-label">Total Agents</div>
+      <div class="stat-value green" id="stat-agents">—</div>
+      <div class="stat-sub">synthetic investors</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Memory Events</div>
+      <div class="stat-value" id="stat-events">—</div>
+      <div class="stat-sub">LLM reactions logged</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Avg Risk Tolerance</div>
+      <div class="stat-value" id="stat-risk">—</div>
+      <div class="stat-sub">out of 10</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Avg Capital</div>
+      <div class="stat-value" id="stat-capital">—</div>
+      <div class="stat-sub">USD weighted avg</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">News Sensitivity</div>
+      <div class="stat-value" id="stat-news">—</div>
+      <div class="stat-sub">avg out of 10</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Loss Aversion</div>
+      <div class="stat-value" id="stat-loss">—</div>
+      <div class="stat-sub">avg multiplier</div>
+    </div>
+  </div>
+
+  <!-- Sentiment by Asset Class -->
+  <div class="card grid-1">
+    <div class="card-title">Sentiment by Asset Class</div>
+    <div class="sent-legend">
+      <span><span class="ldot" style="background:#39d353"></span>24 hour</span>
+      <span><span class="ldot" style="background:#58a6ff"></span>7 day</span>
+      <span style="margin-left:auto;color:var(--muted);font-size:10px;font-family:var(--mono)">weighted: capital × confidence · buy=+1 hold=0 sell/panic=−1</span>
+    </div>
+    <div class="chart-wrap-lg"><canvas id="sentimentChart" role="img" aria-label="Sentiment by asset class"></canvas></div>
+  </div>
+
+  <!-- Sentiment vs Price History -->
+  <div class="card grid-1">
+    <div class="card-title">Sentiment vs Price Change — 30 days</div>
+    <div class="asset-tabs" id="history-tabs"></div>
+    <div class="chart-wrap-lg"><canvas id="historyChart" role="img" aria-label="Sentiment vs price history"></canvas></div>
+  </div>
+
+  <!-- 3 distribution charts -->
+  <div class="grid-3">
+    <div class="card" style="margin-bottom:0">
+      <div class="card-title">Archetype Distribution</div>
+      <div class="chart-wrap"><canvas id="archChart" role="img" aria-label="Archetype distribution"></canvas></div>
+    </div>
+    <div class="card" style="margin-bottom:0">
+      <div class="card-title">Risk Tolerance Distribution</div>
+      <div class="chart-wrap"><canvas id="riskChart" role="img" aria-label="Risk tolerance histogram"></canvas></div>
+    </div>
+    <div class="card" style="margin-bottom:0">
+      <div class="card-title">Primary Strategy</div>
+      <div class="chart-wrap"><canvas id="stratChart" role="img" aria-label="Strategy distribution"></canvas></div>
+    </div>
+  </div>
+  <div style="margin-bottom:16px"></div>
+
+  <!-- Asset Bias + Fear/Greed -->
+  <div class="grid-2">
+    <div class="card" style="margin-bottom:0">
+      <div class="card-title">Asset Class Bias</div>
+      <div class="chart-wrap-sm"><canvas id="biasChart" role="img" aria-label="Asset class bias"></canvas></div>
+    </div>
+    <div class="card" style="margin-bottom:0">
+      <div class="card-title">Fear / Greed</div>
+      <div class="fg-wrap">
+        <div class="fg-row">
+          <span class="fg-lbl">FEAR</span>
+          <div class="fg-track"><div class="fg-needle" id="fg-needle" style="left:45%"></div></div>
+          <span class="fg-lbl">GREED</span>
+        </div>
+        <div class="fg-nums">
+          <div><div class="fg-num" id="fg-fear" style="color:var(--blue)">—</div><div class="stat-label" style="margin:0;text-align:center">Fear</div></div>
+          <div><div class="fg-num" id="fg-greed" style="color:var(--amber)">—</div><div class="stat-label" style="margin:0;text-align:center">Greed</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div style="margin-bottom:16px"></div>
+
+  <!-- Memory Events Feed -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title" style="margin-bottom:0">Recent Agent Reactions</span>
+      <span class="card-count" id="feed-count">— total</span>
+    </div>
+    <div id="events-feed"><div class="empty"><div class="empty-icon">◌</div>No reactions yet — scheduler will populate this hourly</div></div>
+  </div>
+
+  <!-- Agent Table -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title" style="margin-bottom:0">Agent Pool Sample</span>
+      <span class="card-count" id="agent-table-count">showing 50</span>
+    </div>
+    <div class="arch-tabs" id="arch-filter-tabs"></div>
+    <div id="agents-table"><div class="empty"><div class="empty-icon">◌</div>Loading agents...</div></div>
+  </div>
+
+</div>
+
+<script>
+const GRAPH_ID = 'd3a38be8-37d9-4818-be28-5d2d0efa82c0';
+const API = window.location.port === '5001' || window.location.hostname === ''
+  ? `http://${window.location.hostname || 'localhost'}:5001`
+  : window.location.origin;
+
+let archChart, riskChart, stratChart, biasChart, sentimentChart, historyChart;
+let _historyAsset = 'equities';
+let _archFilter = 'all';
+let _allAgents = [];
+
+const ARCH_COLORS = {
+  retail_amateur:'#39d353', retail_experienced:'#58a6ff', prop_trader:'#e3b341',
+  fund_manager:'#f97583', family_office:'#79c0ff', hedge_fund:'#ffa657', pension_fund:'#d2a8ff',
+};
+const STRAT_COLORS = ['#39d353','#58a6ff','#e3b341','#f97583','#79c0ff','#ffa657','#d2a8ff','#56d364','#3fb950','#26a641'];
+
+function fmtCap(v) {
+  if (!v && v!==0) return '—';
+  if (v>=1e9) return '$'+(v/1e9).toFixed(1)+'B';
+  if (v>=1e6) return '$'+(v/1e6).toFixed(1)+'M';
+  if (v>=1e3) return '$'+(v/1e3).toFixed(0)+'K';
+  return '$'+Math.round(v);
+}
+function fmtTime(ts) {
+  if (!ts) return '—';
+  try {
+    const d = new Date(ts);
+    return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short'})+' '+
+           d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+  } catch { return ts; }
+}
+function rClass(r) {
+  return {'buy':'r-buy','sell':'r-sell','hold':'r-hold','panic':'r-panic','hedge':'r-hedge'}[r?.toLowerCase()]||'r-hold';
+}
+
+// ── Charts init ──
+function initCharts() {
+  const mono = "'IBM Plex Mono'";
+  const base = {
+    responsive:true, maintainAspectRatio:false,
+    plugins:{legend:{display:false}},
+    scales:{
+      x:{ticks:{color:'#7d8590',font:{family:mono,size:10}},grid:{color:'#21262d'}},
+      y:{ticks:{color:'#7d8590',font:{family:mono,size:10}},grid:{color:'#21262d'}}
+    }
+  };
+  const yOnly = {...base, scales:{
+    x:{ticks:{color:'#7d8590',font:{family:mono,size:9}},grid:{display:false}},
+    y:{ticks:{color:'#7d8590',font:{family:mono,size:10}},grid:{color:'#21262d'}}
+  }};
+  const xOnly = {...base, scales:{
+    x:{ticks:{color:'#7d8590',font:{family:mono,size:10}},grid:{color:'#21262d'}},
+    y:{ticks:{color:'#7d8590',font:{family:mono,size:9}},grid:{display:false}}
+  }};
+
+  archChart = new Chart(document.getElementById('archChart'),{
+    type:'bar', data:{labels:[],datasets:[{data:[],backgroundColor:'#39d353',borderRadius:3}]},
+    options:{...xOnly, indexAxis:'y'}
+  });
+  riskChart = new Chart(document.getElementById('riskChart'),{
+    type:'bar', data:{labels:[],datasets:[{data:[],backgroundColor:'#e3b341',borderRadius:2}]},
+    options:yOnly
+  });
+  stratChart = new Chart(document.getElementById('stratChart'),{
+    type:'bar', data:{labels:[],datasets:[{data:[],backgroundColor:'#58a6ff',borderRadius:3}]},
+    options:{...xOnly, indexAxis:'y'}
+  });
+  biasChart = new Chart(document.getElementById('biasChart'),{
+    type:'bar', data:{labels:[],datasets:[{data:[],backgroundColor:'#d2a8ff',borderRadius:3}]},
+    options:yOnly
+  });
+  sentimentChart = new Chart(document.getElementById('sentimentChart'),{
+    type:'bar',
+    data:{labels:[],datasets:[
+      {label:'24h',data:[],backgroundColor:'rgba(57,211,83,0.7)',borderRadius:3},
+      {label:'7d', data:[],backgroundColor:'rgba(88,166,255,0.5)',borderRadius:3}
+    ]},
+    options:{...base, scales:{
+      x:{ticks:{color:'#7d8590',font:{family:mono,size:10}},grid:{color:'#21262d'}},
+      y:{min:-1,max:1,ticks:{color:'#7d8590',font:{family:mono,size:10}},grid:{color:'#21262d'},
+        afterDataLimits:scale=>{ scale.min=-1; scale.max=1; }}
+    },plugins:{legend:{display:true,labels:{color:'#7d8590',font:{family:mono,size:10},boxWidth:10}}}}
+  });
+  historyChart = new Chart(document.getElementById('historyChart'),{
+    type:'line',
+    data:{labels:[],datasets:[
+      {label:'Sentiment',data:[],borderColor:'#39d353',backgroundColor:'rgba(57,211,83,0.06)',pointRadius:3,tension:.3,yAxisID:'y'},
+      {label:'Price Δ%',data:[],borderColor:'#58a6ff',backgroundColor:'rgba(88,166,255,0.06)',pointRadius:3,tension:.3,yAxisID:'y1',borderDash:[4,3]}
+    ]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{legend:{display:true,labels:{color:'#7d8590',font:{family:mono,size:10},boxWidth:10}}},
+      scales:{
+        x:{ticks:{color:'#7d8590',font:{family:mono,size:9}},grid:{color:'#21262d'}},
+        y:{ticks:{color:'#39d353',font:{family:mono,size:10}},grid:{color:'#21262d'},title:{display:true,text:'Sentiment',color:'#39d353',font:{family:mono,size:9}}},
+        y1:{position:'right',ticks:{color:'#58a6ff',font:{family:mono,size:10}},grid:{display:false},title:{display:true,text:'Price Δ%',color:'#58a6ff',font:{family:mono,size:9}}}
+      }
+    }
+  });
+}
+
+// ── Signals ──
+function renderSignals(signals) {
+  const el = document.getElementById('signal-panel');
+  if (!signals?.length) { el.innerHTML='<div class="empty" style="grid-column:1/-1;padding:20px 0"><div class="empty-icon">◌</div>No signals yet</div>'; return; }
+  el.innerHTML = signals.map(s => {
+    const sig = s.signal || 'neutral';
+    const chg = s.price_change_24h;
+    const chgStr = chg!=null ? (chg>=0?'+':'')+chg.toFixed(2)+'%' : '—';
+    const chgClass = chg==null?'':chg>=0?'pos':'neg';
+    const score = s.sentiment_score!=null ? (s.sentiment_score>=0?'+':'')+s.sentiment_score.toFixed(2) : '—';
+    return `<div class="sig ${sig}">
+      <div class="sig-asset">${s.asset.replace(/_/g,' ')}</div>
+      <div class="sig-signal ${sig}">${sig}</div>
+      <div class="sig-price">${s.price!=null?'$'+s.price.toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</div>
+      <div class="sig-change ${chgClass}">${chgStr}</div>
+      <div class="sig-score">score ${score} · ${s.event_count||0} events</div>
+    </div>`;
+  }).join('');
+}
+
+// ── History tabs ──
+function renderHistoryTabs(assets) {
+  const el = document.getElementById('history-tabs');
+  el.innerHTML = assets.map(a =>
+    `<button class="asset-tab ${a===_historyAsset?'active':''}" onclick="switchAsset('${a}')">${a.replace(/_/g,' ')}</button>`
+  ).join('');
+}
+function switchAsset(asset) {
+  _historyAsset = asset;
+  document.querySelectorAll('.asset-tab').forEach(t => t.classList.toggle('active', t.textContent.trim()===asset.replace(/_/g,' ')));
+  fetchSignalHistory(asset);
+}
+
+// ── Archetype filter ──
+function buildArchTabs(archetypes) {
+  const el = document.getElementById('arch-filter-tabs');
+  const all = ['all',...archetypes.map(a=>a.name).filter(a=>a)];
+  el.innerHTML = all.map(a =>
+    `<button class="arch-tab ${a===_archFilter?'active':''}" onclick="filterArch('${a}')">${a.replace(/_/g,' ')}</button>`
+  ).join('');
+}
+function filterArch(arch) {
+  _archFilter = arch;
+  document.querySelectorAll('.arch-tab').forEach(t => t.classList.toggle('active', t.textContent.trim()===arch.replace(/_/g,' ')));
+  const filtered = arch==='all' ? _allAgents : _allAgents.filter(a=>a.archetype===arch);
+  renderAgentTable(filtered);
+}
+
+// ── Charts update ──
+function updateCharts(d) {
+  const archs = d.archetypes||[];
+  archChart.data.labels = archs.map(a=>a.name.replace(/_/g,' '));
+  archChart.data.datasets[0].data = archs.map(a=>a.count);
+  archChart.data.datasets[0].backgroundColor = archs.map(a=>ARCH_COLORS[a.name]||'#39d353');
+  archChart.update();
+
+  const rh = d.risk_histogram||[];
+  const rhFull = Array.from({length:10},(_,i)=>(rh.find(r=>r.bucket===i)||{count:0}).count);
+  riskChart.data.labels = ['0','1','2','3','4','5','6','7','8','9'];
+  riskChart.data.datasets[0].data = rhFull;
+  riskChart.update();
+
+  const strats = (d.strategies||[]).slice(0,10);
+  stratChart.data.labels = strats.map(s=>s.name.replace(/_/g,' '));
+  stratChart.data.datasets[0].data = strats.map(s=>s.count);
+  stratChart.data.datasets[0].backgroundColor = STRAT_COLORS.slice(0,strats.length);
+  stratChart.update();
+
+  const bias = d.asset_bias||[];
+  biasChart.data.labels = bias.map(b=>b.name);
+  biasChart.data.datasets[0].data = bias.map(b=>b.count);
+  biasChart.update();
+}
+
+function updateFG(fgData) {
+  if (!fgData?.length) return;
+  const total = fgData.reduce((s,x)=>s+x.count,0);
+  const fp = fgData.find(x=>x.name==='fear');
+  const gp = fgData.find(x=>x.name==='greed');
+  const fPct = fp ? Math.round(fp.count/total*100) : 0;
+  const gPct = gp ? Math.round(gp.count/total*100) : 0;
+  document.getElementById('fg-fear').textContent = fPct+'%';
+  document.getElementById('fg-greed').textContent = gPct+'%';
+  document.getElementById('fg-needle').style.left = gPct+'%';
+}
+
+function updateEvents(events, total) {
+  document.getElementById('feed-count').textContent = (total||0).toLocaleString()+' total';
+  const el = document.getElementById('events-feed');
+  if (!events?.length) { el.innerHTML='<div class="empty"><div class="empty-icon">◌</div>No reactions yet — scheduler will populate this hourly</div>'; return; }
+  el.innerHTML = events.map(e=>`
+    <div class="event">
+      <div><div class="ev-time">${fmtTime(e.timestamp)}</div></div>
+      <div><div class="ev-agent">${e.agent||'—'}</div><div class="ev-arch">${(e.archetype||'').replace(/_/g,' ')}</div></div>
+      <div><span class="rbadge ${rClass(e.reaction)}">${e.reaction||'—'}</span></div>
+      <div class="ev-reason">${(e.reasoning||'').slice(0,120)}${(e.reasoning||'').length>120?'…':''}</div>
+      <div class="ev-conf">${e.confidence!=null?e.confidence+'/10':'—'}</div>
+    </div>`).join('');
+}
+
+function renderAgentTable(agents) {
+  const el = document.getElementById('agents-table');
+  document.getElementById('agent-table-count').textContent = `showing ${agents.length}`;
+  if (!agents?.length) { el.innerHTML='<div class="empty"><div class="empty-icon">◌</div>No agents found</div>'; return; }
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>Name</th><th>Archetype</th><th>Strategy</th>
+      <th>Risk</th><th>Capital</th><th>Horizon</th><th>F/G</th><th>Leverage</th><th>Asset Bias</th>
+    </tr></thead>
+    <tbody>${agents.map(a=>`<tr>
+      <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a.name||'—'}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:${ARCH_COLORS[a.archetype]||'var(--muted)'}">${(a.archetype||'').replace(/_/g,' ')}</td>
+      <td style="font-family:var(--mono);font-size:11px">${(a.strategy||'').replace(/_/g,' ')}</td>
+      <td><div class="risk-bar"><div class="risk-pip" style="width:${(a.risk||0)*10}px;background:${(a.risk||0)>7?'var(--red)':(a.risk||0)>4?'var(--amber)':'var(--green)'}"></div><span style="font-family:var(--mono);font-size:11px">${a.risk??'—'}</span></div></td>
+      <td style="font-family:var(--mono);font-size:11px">${fmtCap(a.capital)}</td>
+      <td style="font-family:var(--mono);font-size:11px">${a.horizon!=null?a.horizon+'d':'—'}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:${a.fear_greed==='greed'?'var(--amber)':'var(--blue)'}">${a.fear_greed||'—'}</td>
+      <td style="font-family:var(--mono);font-size:11px">${a.leverage||'—'}</td>
+      <td style="font-family:var(--mono);font-size:11px">${a.asset_bias||'—'}</td>
+    </tr>`).join('')}</tbody>
+  </table>`;
+}
+
+// ── Sentiment chart ──
+async function fetchSentiment() {
+  try {
+    const res = await fetch(`${API}/api/investors/sentiment?graph_id=${GRAPH_ID}`);
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.success) return;
+    const byClass = json.data.by_asset_class||{};
+    const labels = Object.keys(byClass).map(k=>k.replace(/_/g,' '));
+    sentimentChart.data.labels = labels;
+    sentimentChart.data.datasets[0].data = Object.values(byClass).map(v=>v['24h']?.score??0);
+    sentimentChart.data.datasets[1].data = Object.values(byClass).map(v=>v['7d']?.score??0);
+    sentimentChart.update();
+  } catch(e) {}
+}
+
+// ── History chart ──
+async function fetchSignalHistory(asset) {
+  asset = asset||_historyAsset;
+  try {
+    const res = await fetch(`${API}/api/signals/history?graph_id=${GRAPH_ID}&days=30&asset=${asset}`);
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.success) return;
+    const rows = json.data.history||[];
+    historyChart.data.labels = rows.map(r=>r.date);
+    historyChart.data.datasets[0].data = rows.map(r=>r.sentiment_score??0);
+    historyChart.data.datasets[1].data = rows.map((r,i)=>{
+      if (i===0||!rows[i-1].price||!r.price) return 0;
+      return parseFloat(((r.price-rows[i-1].price)/rows[i-1].price*100).toFixed(4));
+    });
+    historyChart.update();
+  } catch(e) {}
+}
+
+// ── Signals ──
+async function fetchSignals() {
+  try {
+    const res = await fetch(`${API}/api/signals/current?graph_id=${GRAPH_ID}`);
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.success) return;
+    renderSignals(json.data.signals||[]);
+    const assets = (json.data.signals||[]).map(s=>s.asset);
+    renderHistoryTabs(assets);
+  } catch(e) {}
+  fetchSignalHistory();
+}
+
+// ── Main fetch ──
+async function fetchAll() {
+  const dot = document.getElementById('pulse-dot');
+  document.getElementById('status-text').textContent = 'fetching...';
+  try {
+    const [statsRes, agentsRes] = await Promise.all([
+      fetch(`${API}/api/investors/stats?graph_id=${GRAPH_ID}`),
+      fetch(`${API}/api/investors/agents?graph_id=${GRAPH_ID}&limit=200`)
+    ]);
+    fetchSentiment();
+    fetchSignals();
+
+    if (!statsRes.ok) throw new Error('API '+statsRes.status);
+    const stats = await statsRes.json();
+    const agentsJson = await agentsRes.json();
+    if (!stats.success) throw new Error(stats.error);
+
+    const d = stats.data;
+    const avgs = d.averages||{};
+
+    document.getElementById('stat-agents').textContent = (d.pool_size||0).toLocaleString();
+    document.getElementById('stat-events').textContent = (d.total_memory_events||0).toLocaleString();
+    document.getElementById('stat-risk').textContent = avgs.avg_risk??'—';
+    document.getElementById('stat-capital').textContent = fmtCap(avgs.avg_capital);
+    document.getElementById('stat-news').textContent = avgs.avg_news??'—';
+    document.getElementById('stat-loss').textContent = avgs.avg_loss_aversion??'—';
+
+    updateCharts(d);
+    updateFG(d.fear_greed);
+    updateEvents(d.recent_events, d.total_memory_events);
+
+    if (agentsJson.success) {
+      _allAgents = agentsJson.data.agents||[];
+      buildArchTabs(d.archetypes||[]);
+      filterArch(_archFilter);
+    }
+
+    dot.className = 'pulse';
+    document.getElementById('status-text').textContent = 'live';
+    const el = document.getElementById('last-updated');
+    el.style.display = '';
+    el.textContent = 'updated '+new Date().toLocaleTimeString();
+  } catch(e) {
+    dot.className = 'pulse error';
+    document.getElementById('status-text').textContent = 'error: '+e.message;
+  }
+}
+
+initCharts();
+fetchAll();
+setInterval(fetchAll, 30000);
+</script>
+</body>
+</html>
