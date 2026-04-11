@@ -81,8 +81,13 @@ def hourly_job(graph_id: str, status_path: Path, status_state: dict) -> None:
     """
     1. Fetch news → briefing file
     2. Merge briefing into Neo4j
-    3. Run 500-agent tick (skipped if daily job is running)
+    3. Run 500-agent tick (entire job skipped if daily job is running)
     """
+    # Daily job takes priority — skip everything while it is running
+    if _daily_running.is_set():
+        logger.info("Hourly job skipped: daily full simulation in progress")
+        return
+
     logger.info("Hourly job starting")
     error = None
     now = lambda: datetime.now(timezone.utc).isoformat()
@@ -125,10 +130,10 @@ def hourly_job(graph_id: str, status_path: Path, status_state: dict) -> None:
                 error = f"incremental_update: {e}"
                 logger.error(error)
 
-        # Step 3: tick (skip if daily is running)
+        # Step 3: tick (re-check daily flag in case it started between steps 1-2 and now)
         if briefing_path:
             if _daily_running.is_set():
-                logger.info("Skipping hourly tick: daily full simulation in progress")
+                logger.info("Skipping hourly tick: daily full simulation started during hourly run")
             else:
                 try:
                     run_tick(driver, graph_id, str(briefing_path), full=False)
