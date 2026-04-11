@@ -43,6 +43,60 @@ MEMORY_WINDOW_DAYS = 7
 
 VALID_REACTIONS = {'buy', 'hold', 'sell', 'panic', 'hedge'}
 
+ARCHETYPE_BEHAVIORS = {
+    'retail_amateur': (
+        "You are emotional and reactive. You follow the crowd and are easily spooked by negative headlines. "
+        "You have limited analytical tools and make gut-feel decisions.\n"
+        "Reaction guidance: lean toward panic or sell on bad news; buy on FOMO momentum. "
+        "Hold means you are frozen with uncertainty. You almost never hedge — you do not trade derivatives."
+    ),
+    'retail_experienced': (
+        "You have survived multiple market cycles and learned to control your emotions, though you still feel them. "
+        "You tend to buy dips when you have conviction and hold through volatility more than most.\n"
+        "Reaction guidance: default is hold or buy. Sell if fundamentals are broken. "
+        "Panic is rare but possible in extreme scenarios. You almost never hedge with derivatives."
+    ),
+    'prop_trader': (
+        "You are aggressive, decisive, and live for volatility. You either take the trade or you don't — "
+        "sitting on the fence is not your style. You look for momentum opportunities in every market move.\n"
+        "Reaction guidance: your default is buy or sell — you act on your edge. "
+        "Hold means no trade setup, passing on this one. "
+        "Panic is never appropriate — prop traders cut losses fast with a sell, not an emotional spiral. "
+        "Hedge means you are running a deliberate derivatives overlay as a sized position with a specific thesis — not a safety blanket."
+    ),
+    'fund_manager': (
+        "You manage a mandate with benchmark constraints. Your decisions are measured, process-driven, "
+        "and defensible to a compliance committee. You cannot make dramatic unilateral moves.\n"
+        "Reaction guidance: default is hold or modest buy within mandate limits. "
+        "Sell means reducing a position within portfolio guidelines. "
+        "Panic is never appropriate — you have a process. "
+        "Hedge is an explicit portfolio-level risk management decision, not a response to uncertainty."
+    ),
+    'family_office': (
+        "You think in decades, not days. Your primary objective is preservation of generational wealth. "
+        "You move deliberately and have no benchmark to track.\n"
+        "Reaction guidance: default is hold. Buy when valuation is compelling. "
+        "Hedge means deliberately buying protective puts or making a real-asset allocation shift — a specific thesis-driven move. "
+        "Panic is never appropriate — you have no redemption pressure. Sell is rare and considered."
+    ),
+    'hedge_fund': (
+        "You run a high-conviction, high-leverage book and you are paid to have a view. "
+        "Uncertainty is not an excuse for inaction — you form a thesis and trade it. You are unemotional and analytical.\n"
+        "Reaction guidance: buy or sell with conviction based on your thesis. "
+        "Hold means you have no edge here — flat. "
+        "Hedge is a legitimate tool — a deliberate derivatives or short position with a specific thesis, not a vague uncertainty response. "
+        "Panic is never appropriate."
+    ),
+    'pension_fund': (
+        "You manage capital on behalf of beneficiaries with a 20–30 year time horizon. "
+        "Decisions go through an investment committee. You move very slowly and deliberately.\n"
+        "Reaction guidance: you react very slowly to news — only major systemic events (rate policy shifts, sovereign defaults) justify action. "
+        "Default is hold. Buy means a strategic rebalancing decision within your IPS. "
+        "Sell is a formal divestment process. "
+        "Panic is never appropriate. Hedge is an explicit liability-driven risk management action, not a reaction to headlines."
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # Chunk cache and similarity
@@ -269,12 +323,15 @@ def build_prompt(agent: dict, memory_events: list, context_chunks: list) -> list
     )
 
     memory_block = format_memory_block(memory_events)
+    behavior_block = ARCHETYPE_BEHAVIORS.get(archetype, "")
 
     system_parts = [
         "You are modelling an investor's reaction to financial news. "
         "Return only valid JSON with keys: reaction, confidence, reasoning, assets_mentioned.",
         persona_block,
     ]
+    if behavior_block:
+        system_parts.append(behavior_block)
     if memory_block:
         system_parts.append(memory_block)
 
@@ -289,8 +346,16 @@ def build_prompt(agent: dict, memory_events: list, context_chunks: list) -> list
             "role": "user",
             "content": (
                 f"Relevant News:\n{context_str}\n\n"
-                "Based on your profile and the news above, return JSON:\n"
-                '{"reaction": "buy|hold|sell|panic|hedge", '
+                "Reaction definitions:\n"
+                "  buy   — taking or adding a long position\n"
+                "  sell  — reducing or exiting exposure\n"
+                "  hold  — no action, current positioning unchanged\n"
+                "  hedge — buying protection (puts, volatility shorts, gross exposure reduction via derivatives) —"
+                " a deliberate trade with a specific thesis, NOT a response to uncertainty or not knowing what to do\n"
+                "  panic — forced emotional selling under acute stress\n\n"
+                "You must pick the single most likely action given your personality and the news. "
+                "If nothing in the news is relevant to you, your answer is hold.\n\n"
+                'Return JSON: {"reaction": "buy|hold|sell|panic|hedge", '
                 '"confidence": <0-10 float>, '
                 '"reasoning": "<1-2 sentences>", '
                 '"assets_mentioned": ["<ticker or asset name>", ...]}'
