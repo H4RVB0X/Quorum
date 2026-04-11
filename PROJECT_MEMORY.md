@@ -319,7 +319,7 @@ This was the root cause of multiple "connection refused" errors throughout the b
 
 ---
 
-## Current System State (as of 2026-04-11 evening)
+## Current System State (as of 2026-04-11 10:00)
 
 ### What is running
 - Docker: `mirofish-neo4j`, `mirofish-ollama`, `mirofish-offline` (Flask + React frontend)
@@ -355,7 +355,7 @@ This was the root cause of multiple "connection refused" errors throughout the b
 
 ---
 
-## Session: 2026-04-11 — Archetype-Conditional Tick Prompts
+## Session: 2026-04-11 (11:11) — Archetype-Conditional Tick Prompts
 
 ### What was built
 Modified `backend/scripts/simulation_tick.py` to fix the 68% hedge reaction skew.
