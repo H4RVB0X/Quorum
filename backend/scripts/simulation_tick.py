@@ -246,6 +246,103 @@ def load_agent_recent_memory(driver, agent_uuid: str, limit: int = 5) -> list:
         return [dict(r) for r in result]
 
 
+def write_sentiment_snapshot(driver, graph_id: str, tick_reactions: list) -> None:
+    """
+    Write a SentimentSnapshot node to Neo4j capturing the aggregate sentiment
+    for this tick. Uses MERGE on (graph_id, timestamp) to prevent duplicates
+    if the tick is re-run.
+
+    tick_reactions: list of dicts, each with keys:
+        asset_class, reaction, confidence, capital, leverage_typical
+    """
+    if not tick_reactions:
+        return
+
+    from collections import defaultdict as _dd
+
+    # Per-asset capital-weighted sentiment
+    asset_buckets: dict = _dd(lambda: {'wsum': 0.0, 'wtot': 0.0})
+    _SCORES = {'buy': 1.0, 'hedge': 0.5, 'hold': 0.0, 'sell': -1.0, 'panic': -1.0}
+
+    # Reaction distribution for this tick
+    reaction_counts: dict = _dd(int)
+    total = len(tick_reactions)
+
+    for r in tick_reactions:
+        asset = r.get('asset_class') or 'unknown'
+        reaction = (r.get('reaction') or 'hold').lower()
+        confidence = float(r.get('confidence') or 0)
+        capital = float(r.get('capital') or 0)
+        score = _SCORES.get(reaction, 0.0)
+        weight = capital * confidence
+        asset_buckets[asset]['wsum'] += score * weight
+        asset_buckets[asset]['wtot'] += weight
+        reaction_counts[reaction] += 1
+
+    # Compute per-asset scores
+    asset_scores = {}
+    for asset, b in asset_buckets.items():
+        if b['wtot'] == 0:
+            asset_scores[asset] = 0.0
+        else:
+            asset_scores[asset] = round(max(-1.0, min(1.0, b['wsum'] / b['wtot'])), 4)
+
+    # Reaction distribution as percentages
+    reaction_dist = {r: round(c / total, 4) for r, c in reaction_counts.items()} if total else {}
+
+    # Fear/greed score: 50 = neutral, 0 = extreme fear, 100 = extreme greed
+    # Computed as overall mean sentiment across all assets mapped to [0, 100]
+    all_scores = list(asset_scores.values())
+    mean_sent = sum(all_scores) / len(all_scores) if all_scores else 0.0
+    fear_greed_score = round(50 + mean_sent * 50, 2)
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    with driver.session() as session:
+        def _write(tx):
+            tx.run(
+                """
+                MERGE (s:SentimentSnapshot {graph_id: $gid, timestamp: $ts})
+                SET s.equities      = $equities,
+                    s.crypto        = $crypto,
+                    s.bonds         = $bonds,
+                    s.commodities   = $commodities,
+                    s.fx            = $fx,
+                    s.real_estate   = $real_estate,
+                    s.mixed         = $mixed,
+                    s.buy_pct       = $buy_pct,
+                    s.sell_pct      = $sell_pct,
+                    s.hold_pct      = $hold_pct,
+                    s.hedge_pct     = $hedge_pct,
+                    s.panic_pct     = $panic_pct,
+                    s.total_agents  = $total_agents,
+                    s.fear_greed    = $fear_greed
+                """,
+                gid=graph_id,
+                ts=now,
+                equities=asset_scores.get('equities', 0.0),
+                crypto=asset_scores.get('crypto', 0.0),
+                bonds=asset_scores.get('bonds', 0.0),
+                commodities=asset_scores.get('commodities', 0.0),
+                fx=asset_scores.get('fx', 0.0),
+                real_estate=asset_scores.get('real_estate', 0.0),
+                mixed=asset_scores.get('mixed', 0.0),
+                buy_pct=reaction_dist.get('buy', 0.0),
+                sell_pct=reaction_dist.get('sell', 0.0),
+                hold_pct=reaction_dist.get('hold', 0.0),
+                hedge_pct=reaction_dist.get('hedge', 0.0),
+                panic_pct=reaction_dist.get('panic', 0.0),
+                total_agents=total,
+                fear_greed=fear_greed_score,
+            )
+        session.execute_write(_write)
+
+    logger.info(
+        f"SentimentSnapshot written: {total} agents, "
+        f"fear_greed={fear_greed_score}, assets={list(asset_scores.keys())}"
+    )
+
+
 def write_memory_event(driver, agent_uuid: str, briefing_source: str, reaction_data: dict) -> None:
     """Create a :MemoryEvent node and link it to the agent."""
     event_uuid = str(uuid.uuid4())
@@ -357,7 +454,7 @@ def build_prompt(agent: dict, memory_events: list, context_chunks: list) -> list
                 "  sell  — reducing or exiting exposure\n"
                 "  hold  — no action, current positioning unchanged\n"
                 "  hedge — you are making a deliberate, specific trade to offset a named risk — you must be able to state exactly what instrument you are using and what exposure you are hedging. This is NOT a response to uncertainty or partial relevance. If you cannot name the instrument and the risk, choose hold instead.\n"
-                "  panic — you are liquidating positions due to acute fear of imminent loss. Only valid for retail_amateur and retail_experienced archetypes during extreme market stress events (crashes, sudden rate shocks, geopolitical escalation). Professional archetypes (prop_trader, fund_manager, hedge_fund, family_office, pension_fund) never panic — they sell instead.\n\n"
+                "  panic — you are selling everything immediately due to extreme fear — valid ONLY for retail_amateur and retail_experienced when the news contains any of: market crash, circuit breaker, trading halt, emergency rate hike, bank collapse, war escalation, systemic crisis. You do not think — you react. If you are retail and the news contains any of these triggers, panic is your most likely response.\n\n"
                 "You must pick the single most likely action given your personality and the news. "
                 "If nothing in the news is relevant to you, your answer is hold.\n\n"
                 'Return JSON: {"reaction": "buy|hold|sell|panic|hedge", '
@@ -390,7 +487,8 @@ def call_llm_for_agent(llm: LLMClient, agent: dict, memory: list, chunks: list) 
 # Main tick
 # ---------------------------------------------------------------------------
 
-def run_tick(driver, graph_id: str, briefing_path: str, full: bool = False, checkpoint_path: Path = CHECKPOINT_PATH, no_memory: bool = False) -> None:
+def run_tick(driver, graph_id: str, briefing_path: str, full: bool = False,
+            checkpoint_path: Path = CHECKPOINT_PATH, no_memory: bool = False) -> None:
     llm = LLMClient()
     embedding_svc = EmbeddingService()
 
@@ -425,6 +523,8 @@ def run_tick(driver, graph_id: str, briefing_path: str, full: bool = False, chec
 
     processed_ids = list(already_processed)
     errors = 0
+    # Accumulate reaction data for the SentimentSnapshot written after the loop
+    tick_reactions: list = []
 
     for i, agent in enumerate(agents):
         # Fetch agent's recent reaction history (last 5 events)
@@ -462,6 +562,14 @@ def run_tick(driver, graph_id: str, briefing_path: str, full: bool = False, chec
 
         if write_success:
             processed_ids.append(agent['uuid'])
+            # Accumulate for SentimentSnapshot
+            tick_reactions.append({
+                'asset_class':     agent.get('asset_class_bias'),
+                'reaction':        reaction.get('reaction', 'hold'),
+                'confidence':      reaction.get('confidence', 5.0),
+                'capital':         agent.get('capital_usd', 0),
+                'leverage_typical': agent.get('leverage_typical', 'none'),
+            })
 
         # Checkpoint every CHECKPOINT_INTERVAL agents
         if (i + 1) % CHECKPOINT_INTERVAL == 0:
@@ -471,6 +579,14 @@ def run_tick(driver, graph_id: str, briefing_path: str, full: bool = False, chec
     # Clean up checkpoint on success
     if checkpoint_path.exists():
         checkpoint_path.unlink()
+
+    # Write SentimentSnapshot for this tick to Neo4j
+    # This powers the tick-level sentiment history chart on the dashboard.
+    # Do not remove — removing this breaks the tick-level chart in dashboard.html.
+    try:
+        write_sentiment_snapshot(driver, graph_id, tick_reactions)
+    except Exception as e:
+        logger.warning(f"SentimentSnapshot write failed: {e} — tick data will not appear in history chart")
 
     print(f"Tick complete: {len(agents)} agents processed, {errors} errors")
 

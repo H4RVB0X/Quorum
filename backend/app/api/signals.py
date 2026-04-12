@@ -9,6 +9,12 @@ Endpoints:
   GET /api/signals/history?graph_id=...&days=30
     Returns daily sentiment scores alongside price data for charting.
 
+  GET /api/signals/backtest?graph_id=...&days=30
+    Returns signal accuracy vs actual next-day price moves.
+
+  GET /api/signals/sentiment_history?graph_id=...&hours=48
+    Returns all SentimentSnapshot nodes from the last N hours (tick-level).
+
 Signal thresholds:
   score > +0.4  → bullish
   score < -0.4  → bearish
@@ -230,4 +236,164 @@ def signals_history():
 
     except Exception as e:
         logger.error(f"Signals history error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@signals_bp.route("/backtest", methods=["GET"])
+def signals_backtest():
+    """
+    Signal accuracy backtest — compares each day's directional signals
+    against the actual next-day price move for each asset class.
+
+    Query params: graph_id (required), days (default 30)
+
+    Requires at least 2 days of price snapshots in backend/prices/.
+
+    Returns:
+      per_asset: {asset: {accuracy, total, correct}}
+      per_archetype: {arch: {accuracy, total, correct}}
+      rolling_7d: {asset: {dates, accuracy}}
+      confidence_calibration: {tier: {accuracy, count}}
+    """
+    graph_id = request.args.get("graph_id")
+    if not graph_id:
+        return jsonify({"success": False, "error": "graph_id required"}), 400
+
+    days = request.args.get("days", 30, type=int)
+
+    try:
+        # Import here to avoid circular dependency and keep backtester standalone.
+        # Path from backend/app/api/ up two levels to backend/, then into scripts/.
+        import sys, os
+        scripts_dir = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), '..', '..', 'scripts')
+        )
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        from backtester import run_backtest
+
+        driver = _get_driver()
+        result = run_backtest(driver, graph_id, days=days)
+        return jsonify({"success": True, "data": result})
+
+    except Exception as e:
+        logger.error(f"Backtest error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+_SENTIMENT_HISTORY_LIMIT = 2000
+
+
+@signals_bp.route("/sentiment_history", methods=["GET"])
+def sentiment_history():
+    """
+    Returns all SentimentSnapshot nodes from the last N hours or N days.
+    Snapshots are written every tick by simulation_tick.py.
+
+    Query params:
+      graph_id (required)
+      hours    (default 48 → ~96 data points at 30-min cadence)
+      days     (alternative to hours; e.g. days=30 → full half-hourly 30-day history)
+
+    If both are supplied, hours takes precedence.
+    Hard cap: at most 2000 snapshots returned; a warning is logged and
+    ``capped: true`` is set in the response if the limit is hit.
+
+    Each entry: {timestamp, assets: {equities, crypto, ...},
+                 reactions: {buy, sell, hold, hedge, panic},
+                 fear_greed, total_agents}
+    """
+    graph_id = request.args.get("graph_id")
+    if not graph_id:
+        return jsonify({"success": False, "error": "graph_id required"}), 400
+
+    hours_param = request.args.get("hours", None, type=int)
+    days_param  = request.args.get("days",  None, type=int)
+
+    if hours_param is not None:
+        hours = hours_param
+    elif days_param is not None:
+        hours = days_param * 24
+    else:
+        hours = 48  # default: last 48 hours (~96 snapshots at 30-min cadence)
+
+    try:
+        driver = _get_driver()
+        now = datetime.now(timezone.utc)
+        since = (now - timedelta(hours=hours)).isoformat()
+
+        with driver.session() as session:
+            rows = session.run(
+                """
+                MATCH (s:SentimentSnapshot {graph_id: $gid})
+                WHERE s.timestamp >= $since
+                RETURN
+                    s.timestamp   AS timestamp,
+                    s.equities    AS equities,
+                    s.crypto      AS crypto,
+                    s.bonds       AS bonds,
+                    s.commodities AS commodities,
+                    s.fx          AS fx,
+                    s.real_estate AS real_estate,
+                    s.mixed       AS mixed,
+                    s.buy_pct     AS buy_pct,
+                    s.sell_pct    AS sell_pct,
+                    s.hold_pct    AS hold_pct,
+                    s.hedge_pct   AS hedge_pct,
+                    s.panic_pct   AS panic_pct,
+                    s.total_agents AS total_agents,
+                    s.fear_greed  AS fear_greed
+                ORDER BY s.timestamp ASC
+                LIMIT $limit
+                """,
+                gid=graph_id,
+                since=since,
+                limit=_SENTIMENT_HISTORY_LIMIT,
+            ).data()
+
+        capped = len(rows) == _SENTIMENT_HISTORY_LIMIT
+        if capped:
+            logger.warning(
+                f"sentiment_history: result capped at {_SENTIMENT_HISTORY_LIMIT} snapshots "
+                f"(hours={hours}). Increase limit or reduce window if more data is needed."
+            )
+
+        snapshots = [
+            {
+                "timestamp": r["timestamp"],
+                "assets": {
+                    "equities":    r.get("equities",    0.0),
+                    "crypto":      r.get("crypto",      0.0),
+                    "bonds":       r.get("bonds",       0.0),
+                    "commodities": r.get("commodities", 0.0),
+                    "fx":          r.get("fx",          0.0),
+                    "real_estate": r.get("real_estate", 0.0),
+                    "mixed":       r.get("mixed",       0.0),
+                },
+                "reactions": {
+                    "buy":   r.get("buy_pct",   0.0),
+                    "sell":  r.get("sell_pct",  0.0),
+                    "hold":  r.get("hold_pct",  0.0),
+                    "hedge": r.get("hedge_pct", 0.0),
+                    "panic": r.get("panic_pct", 0.0),
+                },
+                "fear_greed":    r.get("fear_greed", 50.0),
+                "total_agents":  r.get("total_agents", 0),
+            }
+            for r in rows
+        ]
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "snapshots":    snapshots,
+                "count":        len(snapshots),
+                "hours":        hours,
+                "capped":       capped,
+                "generated_at": now.isoformat(),
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Sentiment history error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500

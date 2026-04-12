@@ -50,6 +50,45 @@ SPACY_LABEL_MAP: Dict[str, str] = {
     "NORP":    "Group",
 }
 
+# Post-processing corrections for entities spaCy commonly misclassifies.
+# Applied after label mapping, before deduplication.
+ENTITY_TYPE_CORRECTIONS: Dict[str, str] = {
+    "Bloomberg":       "Company",
+    "Reuters":         "Company",
+    "CNBC":            "Company",
+    "MarketWatch":     "Company",
+    "Qualcomm":        "Company",
+    "Intel":           "Company",
+    "AMD":             "Company",
+    "Nasdaq":          "Company",
+    "NYSE":            "Company",
+    "Fed":             "Company",
+    "Federal Reserve": "Company",
+    # Media / financial data providers
+    "FactSet":         "Company",
+    "Refinitiv":       "Company",
+    "Morningstar":     "Company",
+    "S&P":             "Company",
+    "S&P 500":         "Company",
+    "Dow Jones":       "Company",
+    "Wall Street":     "Company",
+    # Commonly misclassified as PERSON or GPE
+    "Washington":      "Location",
+    "Treasury":        "Company",
+    "White House":     "Location",
+}
+
+# Entities whose exact names are noise — financial metrics, role acronyms,
+# common ticker symbols, and FX codes that spaCy surfaces as entities.
+# Applied after ENTITY_TYPE_CORRECTIONS; any entity whose name appears in
+# this set (case-sensitive) is dropped and never written to Neo4j.
+ENTITY_REMOVE_LIST: set = {
+    "ARPU", "CapEx", "PNT", "EBITDA", "EPS", "GDP", "CPI",
+    "ETF", "IPO", "CEO", "CFO", "COO", "CTO",
+    "SPY", "QQQ", "TLT", "GLD",
+    "VIX", "USD", "EUR", "GBP", "JPY", "BTC", "ETH",
+}
+
 # Neo4j UNWIND batch size — keeps payload under Neo4j's recommended limits
 BATCH_SIZE = 500
 
@@ -71,7 +110,8 @@ ON CREATE SET
     n.created_at          = $now,
     n.last_seen           = datetime(),
     n.is_synthetic        = false,
-    n.central_bank_source = e.central_bank_source
+    n.central_bank_source = e.central_bank_source,
+    n.mention_count       = e.mention_count
 ON MATCH SET
     n.last_seen           = CASE WHEN n.is_synthetic THEN n.last_seen ELSE datetime() END,
     n.type                = CASE WHEN n.is_synthetic THEN n.type   ELSE e.type        END,
@@ -79,7 +119,8 @@ ON MATCH SET
         WHEN n.is_synthetic        THEN n.central_bank_source
         WHEN e.central_bank_source THEN true
         ELSE n.central_bank_source
-    END
+    END,
+    n.mention_count       = CASE WHEN n.is_synthetic THEN n.mention_count ELSE e.mention_count END
 """
 
 # Exposed so tests can inspect
@@ -131,8 +172,11 @@ def extract_entities_spacy(
 
     Filters:
     - Label must be in SPACY_LABEL_MAP (ORG, PERSON, GPE, …)
-    - Name must be at least 2 characters
+    - Name must be at least 3 characters
     - Name must not be purely numeric (e.g. bare years like "2024" are dropped)
+    - Name must not appear in ENTITY_REMOVE_LIST (financial metrics, role acronyms,
+      common tickers, FX codes)
+    - Person entities must contain a space (single-token first names are dropped)
 
     Deduplicates within the chunk by (name.lower(), type).
 
@@ -157,12 +201,21 @@ def extract_entities_spacy(
             continue
 
         name = ent.text.strip()
-        if len(name) < 2:
+        if len(name) < 3:
             continue
         if name.isnumeric():
             continue
 
-        etype = SPACY_LABEL_MAP[label]
+        # Drop noise acronyms, metrics, tickers, and FX codes
+        if name in ENTITY_REMOVE_LIST:
+            continue
+
+        etype = ENTITY_TYPE_CORRECTIONS.get(name, SPACY_LABEL_MAP[label])
+
+        # Drop single-token Person names (no surname = unreliable partial match)
+        if etype == "Person" and " " not in name:
+            continue
+
         key: Tuple[str, str] = (name.lower(), etype)
         if key in seen:
             continue
@@ -201,6 +254,7 @@ def batch_merge_entities(
             "type":                e["type"],
             "summary":             f"{e['name']} ({e['type']})",
             "central_bank_source": bool(e.get("central_bank_source", False)),
+            "mention_count":       int(e.get("mention_count", 1)),
         }
         for e in entities
     ]
@@ -243,8 +297,11 @@ def process_briefing(driver, graph_id: str, briefing_path: str) -> None:
             key = (ent["name"].lower(), ent["type"])
             if key not in global_entities:
                 global_entities[key] = ent
-            elif ent["central_bank_source"]:
-                global_entities[key]["central_bank_source"] = True
+                global_entities[key]["mention_count"] = 1
+            else:
+                global_entities[key]["mention_count"] = global_entities[key].get("mention_count", 1) + 1
+                if ent["central_bank_source"]:
+                    global_entities[key]["central_bank_source"] = True
 
     unique_entities = list(global_entities.values())
     logger.info(

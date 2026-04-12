@@ -79,12 +79,14 @@ def create_app(config_class=Config):
     from .api.investors import investors_bp
     from .api.control import control_bp
     from .api.signals import signals_bp
+    from .api.live import live_bp
     app.register_blueprint(graph_bp, url_prefix='/api/graph')
     app.register_blueprint(simulation_bp, url_prefix='/api/simulation')
     app.register_blueprint(report_bp, url_prefix='/api/report')
     app.register_blueprint(investors_bp, url_prefix='/api/investors')
     app.register_blueprint(control_bp, url_prefix='/api/control')
     app.register_blueprint(signals_bp, url_prefix='/api/signals')
+    app.register_blueprint(live_bp, url_prefix='/api/live')
 
     # Health check
     @app.route('/health')

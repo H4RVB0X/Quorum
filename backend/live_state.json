@@ -1,0 +1,248 @@
+{
+  "refreshed_at": "2026-04-12T16:03:05.663467+00:00",
+  "prices": {
+    "equities": 679.460022,
+    "crypto": 70886.101562,
+    "bonds": 86.489998,
+    "commodities": 437.130005,
+    "fx": 98.650002,
+    "real_estate": 92.980003,
+    "mixed": 144.979996
+  },
+  "price_changes_24h": {
+    "equities": 0.0,
+    "crypto": -3.4829,
+    "bonds": 0.0,
+    "commodities": 0.0,
+    "fx": 0.0,
+    "real_estate": 0.0,
+    "mixed": 0.0
+  },
+  "sentiment": {
+    "by_asset_class": {
+      "equities": 0.2591,
+      "crypto": 0.5784,
+      "bonds": 0.2486,
+      "commodities": 0.7495,
+      "fx": 0.4724,
+      "real_estate": 0.0732,
+      "mixed": 0.2716
+    },
+    "by_asset_class_equal": {
+      "equities": 0.3123,
+      "crypto": 0.6359,
+      "bonds": 0.3038,
+      "commodities": 0.5986,
+      "fx": 0.4628,
+      "real_estate": 0.2448,
+      "mixed": -0.1043
+    },
+    "fear_greed": "greed"
+  },
+  "reaction_distribution": {
+    "buy": 31.27,
+    "sell": 9.73,
+    "hold": 51.48,
+    "hedge": 7.52,
+    "panic": 0
+  },
+  "signals": [
+    {
+      "asset": "equities",
+      "direction": "neutral",
+      "confidence": 0.2591,
+      "price": 679.460022,
+      "change_24h": 0.0
+    },
+    {
+      "asset": "crypto",
+      "direction": "bullish",
+      "confidence": 0.5784,
+      "price": 70886.101562,
+      "change_24h": -3.4829
+    },
+    {
+      "asset": "bonds",
+      "direction": "neutral",
+      "confidence": 0.2486,
+      "price": 86.489998,
+      "change_24h": 0.0
+    },
+    {
+      "asset": "commodities",
+      "direction": "bullish",
+      "confidence": 0.7495,
+      "price": 437.130005,
+      "change_24h": 0.0
+    },
+    {
+      "asset": "fx",
+      "direction": "bullish",
+      "confidence": 0.4724,
+      "price": 98.650002,
+      "change_24h": 0.0
+    },
+    {
+      "asset": "real_estate",
+      "direction": "neutral",
+      "confidence": 0.0732,
+      "price": 92.980003,
+      "change_24h": 0.0
+    },
+    {
+      "asset": "mixed",
+      "direction": "neutral",
+      "confidence": 0.2716,
+      "price": 144.979996,
+      "change_24h": 0.0
+    }
+  ],
+  "top_entities": [
+    {
+      "name": "Matt Desch",
+      "type": "Person",
+      "count": 37
+    },
+    {
+      "name": "Vince",
+      "type": "Person",
+      "count": 10
+    },
+    {
+      "name": "Walter Piecyk",
+      "type": "Person",
+      "count": 9
+    },
+    {
+      "name": "Matt",
+      "type": "Person",
+      "count": 8
+    },
+    {
+      "name": "NYSE",
+      "type": "Company",
+      "count": 8
+    },
+    {
+      "name": "Vincent O'Neill",
+      "type": "Person",
+      "count": 7
+    },
+    {
+      "name": "Colin Canfield",
+      "type": "Person",
+      "count": 6
+    },
+    {
+      "name": "ARPU",
+      "type": "Company",
+      "count": 6
+    },
+    {
+      "name": "PNT",
+      "type": "Company",
+      "count": 6
+    },
+    {
+      "name": "CapEx",
+      "type": "Company",
+      "count": 5
+    }
+  ],
+  "recent_events": [
+    {
+      "agent": "Nina Tanaka",
+      "archetype": "fund_manager",
+      "reaction": "hold",
+      "confidence": 7.89,
+      "reasoning": "While the news indicates positive growth and revenue increases, it is not directly relevant to my current mandate or portfolio holdings. The information does not provide a clear thesis for buying or selling any assets mentioned.",
+      "timestamp": "2026-04-12T15:57:11.177857+00:00"
+    },
+    {
+      "agent": "Max Taylor",
+      "archetype": "retail_amateur",
+      "reaction": "hold",
+      "confidence": 6.5,
+      "reasoning": "The news mentions various sectors and companies, but none directly relate to my existing investments or strategies that I fully understand. The CPI increase and the potential risks for risk assets are worrying, but not specific enough to trigger a sale or buy action.",
+      "timestamp": "2026-04-12T15:57:06.165738+00:00"
+    },
+    {
+      "agent": "Kwesi McCarthy",
+      "archetype": "retail_amateur",
+      "reaction": "buy",
+      "confidence": 7.5,
+      "reasoning": "The news about Rigetti Computing's potential upside of 119% from current levels indicates a strong buy signal, while the other news doesn't directly impact my portfolio or investment strategy.",
+      "timestamp": "2026-04-12T15:57:00.087682+00:00"
+    },
+    {
+      "agent": "Frederick Oliveira",
+      "archetype": "prop_trader",
+      "reaction": "hold",
+      "confidence": 7.5,
+      "reasoning": "The news does not provide specific actionable information that aligns with my current trading strategy, which focuses on momentum and volatility in markets such as crude oil and tech stocks.",
+      "timestamp": "2026-04-12T15:56:55.771288+00:00"
+    },
+    {
+      "agent": "Akira Horv\u00e1th",
+      "archetype": "prop_trader",
+      "reaction": "sell",
+      "confidence": 7.5,
+      "reasoning": "The ongoing tensions in the Middle East are affecting tech stocks, and with a ceasefire that appears unstable, it's wise to reduce exposure before any further negative impact on risk assets.",
+      "timestamp": "2026-04-12T15:56:51.688037+00:00"
+    },
+    {
+      "agent": "Lakshmi Carvalho",
+      "archetype": "retail_experienced",
+      "reaction": "buy",
+      "confidence": 7.5,
+      "reasoning": "The news about emerging markets performing well and the valuation cushion compared to U.S.-only portfolios suggests an opportunity for growth in international funds, which aligns with my current strategy of looking for undervalued assets.",
+      "timestamp": "2026-04-12T15:56:47.536837+00:00"
+    },
+    {
+      "agent": "William Vargas",
+      "archetype": "prop_trader",
+      "reaction": "buy",
+      "confidence": 7.5,
+      "reasoning": "The news of the dollar's fall and creditors' actions signals a shift in traditional market behavior, presenting an opportunity to invest counterintuitively as a contrarian trader.",
+      "timestamp": "2026-04-12T15:56:42.774258+00:00"
+    },
+    {
+      "agent": "Bilal Bakke",
+      "archetype": "retail_amateur",
+      "reaction": "hold",
+      "confidence": 6.5,
+      "reasoning": "The news discusses a variety of topics including war, inflation, and tech stocks, but does not contain any immediate triggers that would cause panic for me as an amateur investor with low herd behavior sensitivity.",
+      "timestamp": "2026-04-12T15:56:38.232783+00:00"
+    },
+    {
+      "agent": "George Lee",
+      "archetype": "retail_amateur",
+      "reaction": "hold",
+      "confidence": 7.4,
+      "reasoning": "The news mentions various companies and sectors but does not provide specific information about any of my current holdings or potential buys that would affect my fear/greed balance significantly.",
+      "timestamp": "2026-04-12T15:56:33.251366+00:00"
+    },
+    {
+      "agent": "Rahul Mehta",
+      "archetype": "retail_amateur",
+      "reaction": "buy",
+      "confidence": 7.5,
+      "reasoning": "The news about Iridium's continued growth and investment in new opportunities, as well as Apple's strong iPhone sales and increasing average selling price, indicates that there are profitable sectors to invest in.",
+      "timestamp": "2026-04-12T15:56:27.905051+00:00"
+    }
+  ],
+  "pool_stats": {
+    "pool_size": 8192,
+    "total_memory_events": 16750,
+    "fear_count": 4152,
+    "greed_count": 4040
+  },
+  "feed_breakdown": [
+    {
+      "source": "Yahoo Finance",
+      "count": 16
+    }
+  ],
+  "last_tick_at": "2026-04-12T05:00:01.122245+00:00",
+  "last_daily_at": "2026-04-12T15:57:11.265141+00:00"
+}

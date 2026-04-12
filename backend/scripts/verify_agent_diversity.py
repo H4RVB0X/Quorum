@@ -20,8 +20,8 @@ import sys
 import os
 import argparse
 import random
-from collections import Counter
-from datetime import datetime, timezone
+from collections import Counter, defaultdict
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -485,6 +485,148 @@ def check_news_reaction_variance(agents: list, llm: LLMClient) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Check 8: Reaction diversity (last 7 days of MemoryEvent nodes)
+# ---------------------------------------------------------------------------
+
+# Reaction direction scores for Pearson correlation with risk_tolerance.
+# buy=1 (most bullish), hedge=-0.5 (defensive/risk-off), hold=0 (neutral),
+# sell=-1 (bearish), panic=-2 (extreme fear / liquidation).
+_REACTION_DIRECTION_MAP = {
+    'buy':   1.0,
+    'hold':  0.0,
+    'hedge': -0.5,
+    'sell':  -1.0,
+    'panic': -2.0,
+}
+
+
+def check_reaction_diversity(driver, graph_id: str) -> dict:
+    """
+    Check 8 — Reaction diversity over the last 7 days.
+
+    Queries all MemoryEvent nodes from the last 7 days, groups by archetype,
+    and for each archetype:
+      - Computes reaction distribution (buy / hold / sell / hedge / panic %)
+      - Flags mode collapse if any single reaction > 60% of that archetype's events
+      - Computes Pearson correlation between agent risk_tolerance and reaction
+        direction (buy=+1, hold=0, hedge=-0.5, sell=-1, panic=-2)
+
+    Prints a summary table to stdout and returns a result dict compatible
+    with the rest of the audit framework.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+    with driver.session() as session:
+        rows = session.run(
+            """
+            MATCH (a:Entity {graph_id: $gid, is_synthetic: true})-[:HAS_MEMORY]->(m:MemoryEvent)
+            WHERE m.timestamp >= $since
+            RETURN
+                a.investor_archetype AS archetype,
+                a.risk_tolerance     AS risk_tolerance,
+                m.reaction           AS reaction
+            """,
+            gid=graph_id,
+            since=cutoff,
+        ).data()
+
+    if not rows:
+        return {
+            'error': 'No MemoryEvent nodes in last 7 days — run a tick first',
+            'flags': [],
+            'summary': [],
+            'total_events': 0,
+            'passed': True,  # no data is not a failure
+        }
+
+    # Group by archetype
+    by_arch: dict = defaultdict(list)
+    for row in rows:
+        arch = row.get('archetype') or 'unknown'
+        by_arch[arch].append(row)
+
+    flags = []
+    summary = []
+
+    for arch in sorted(by_arch.keys()):
+        events = by_arch[arch]
+        n = len(events)
+
+        # Reaction distribution
+        counter = Counter((e.get('reaction') or 'hold').lower() for e in events)
+        dominant_reaction, dominant_count = counter.most_common(1)[0]
+        dominant_pct = dominant_count / n
+
+        collapse_warning = dominant_pct > REACTION_DOMINANCE_THRESHOLD
+
+        # Pearson correlation: risk_tolerance vs reaction direction score
+        risks = []
+        directions = []
+        for e in events:
+            r = e.get('risk_tolerance')
+            rxn = (e.get('reaction') or 'hold').lower()
+            if r is not None and rxn in _REACTION_DIRECTION_MAP:
+                risks.append(float(r))
+                directions.append(_REACTION_DIRECTION_MAP[rxn])
+
+        risk_corr = None
+        if len(risks) >= 10:
+            try:
+                c = np.corrcoef(risks, directions)[0, 1]
+                risk_corr = None if np.isnan(c) else round(float(c), 4)
+            except Exception:
+                risk_corr = None
+
+        summary.append({
+            'archetype':         arch,
+            'total_events':      n,
+            'dominant_reaction': dominant_reaction,
+            'dominant_pct':      dominant_pct,
+            'collapse_warning':  collapse_warning,
+            'risk_correlation':  risk_corr,
+            'distribution':      dict(counter.most_common()),
+        })
+
+        if collapse_warning:
+            flags.append(
+                f"{arch}: '{dominant_reaction}' = {dominant_pct:.1%} of {n} events "
+                f"(>{REACTION_DOMINANCE_THRESHOLD:.0%} threshold) — mode collapse"
+            )
+
+    # Print summary table to stdout for direct script use
+    header = f"{'Archetype':<22} {'Dominant':>10} {'%':>6} {'Collapse':>9} {'RiskCorr':>9}"
+    print("\n" + "─" * len(header))
+    print("Reaction Diversity Summary (last 7 days)")
+    print("─" * len(header))
+    print(header)
+    print("─" * len(header))
+    for row in summary:
+        collapse_str = "WARNING" if row['collapse_warning'] else "ok"
+        corr_str = f"{row['risk_correlation']:+.3f}" if row['risk_correlation'] is not None else "n/a"
+        print(
+            f"{row['archetype']:<22} "
+            f"{row['dominant_reaction']:>10} "
+            f"{row['dominant_pct']:>5.1%} "
+            f"{collapse_str:>9} "
+            f"{corr_str:>9}"
+        )
+    print("─" * len(header))
+    if flags:
+        for f in flags:
+            print(f"  [WARNING] {f}")
+    else:
+        print("  No mode collapse detected.")
+    print()
+
+    return {
+        'summary':       summary,
+        'flags':         flags,
+        'total_events':  len(rows),
+        'passed':        len(flags) == 0,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Report formatting
 # ---------------------------------------------------------------------------
 
@@ -503,6 +645,7 @@ def format_report(
     check5: dict,
     check6: dict,
     check7: dict,
+    check8: dict = None,
 ) -> str:
     W = 72
     lines = [
@@ -516,13 +659,14 @@ def format_report(
     ]
 
     named_checks = [
-        ("1. Uniqueness",            check1),
-        ("2. Distribution",          check2),
-        ("3. Fat Tails",             check3),
-        ("4. Strategy Coverage",     check4),
-        ("5. Archetype Coverage",    check5),
-        ("6. Trait Correlation",     check6),
-        ("7. News Reaction Variance",check7),
+        ("1. Uniqueness",              check1),
+        ("2. Distribution",            check2),
+        ("3. Fat Tails",               check3),
+        ("4. Strategy Coverage",       check4),
+        ("5. Archetype Coverage",      check5),
+        ("6. Trait Correlation",       check6),
+        ("7. News Reaction Variance",  check7),
+        ("8. Reaction Diversity (7d)", check8 or {'flags': [], 'passed': True, 'error': 'Not run'}),
     ]
 
     all_flags = []
@@ -601,6 +745,18 @@ def format_report(
                     if data.get('errors', 0) > 0:
                         lines.append(f"         LLM errors: {data['errors']}")
 
+        elif name.startswith("8."):
+            total_ev = result.get('total_events', 0)
+            lines.append(f"       MemoryEvents (last 7 days): {total_ev}")
+            for row in result.get('summary', []):
+                arch = row['archetype']
+                dom = row['dominant_reaction']
+                pct = row['dominant_pct']
+                warn = " ← COLLAPSE" if row['collapse_warning'] else ""
+                corr = (f"r={row['risk_correlation']:+.3f}"
+                        if row['risk_correlation'] is not None else "r=n/a")
+                lines.append(f"         {arch:<22} {dom:>8} {pct:>5.1%} {corr:>9}{warn}")
+
         lines.append("")
 
     lines += [
@@ -668,7 +824,10 @@ def run_audit(driver, graph_id: str) -> tuple:
     logger.info("Running Check 7: News reaction variance (LLM)...")
     check7 = check_news_reaction_variance(agents, llm)
 
-    checks = [check1, check2, check3, check4, check5, check6, check7]
+    logger.info("Running Check 8: Reaction diversity (last 7 days)...")
+    check8 = check_reaction_diversity(driver, graph_id)
+
+    checks = [check1, check2, check3, check4, check5, check6, check7, check8]
     all_flags = sum(len(c.get('flags', [])) for c in checks)
     overall_passed = all(c.get('passed', False) for c in checks)
 
@@ -683,6 +842,7 @@ def run_audit(driver, graph_id: str) -> tuple:
         check5=check5,
         check6=check6,
         check7=check7,
+        check8=check8,
     )
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)

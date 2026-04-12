@@ -4,10 +4,16 @@ Provides endpoints for querying synthetic investor agents and their memory event
 """
 
 import os
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from flask import Blueprint, request, jsonify, current_app
 from neo4j import GraphDatabase
 from ..utils.logger import get_logger
+
+# Sidecar source files written by news_fetcher.py alongside each briefing
+_BRIEFINGS_DIR = Path(__file__).parent.parent.parent.parent / "backend" / "briefings"
+_BRIEFINGS_DIR_ALT = Path(__file__).parent.parent.parent / "briefings"
 
 investors_bp = Blueprint('investors', __name__)
 logger = get_logger('mirofish.api.investors')
@@ -22,24 +28,62 @@ _REACTION_SCORES = {
     'panic': -1.0,
 }
 
+# Leverage multipliers applied ONLY to the 24h sentiment window.
+# Leverage is a short-horizon amplifier: a 10x-leveraged retail trader reacts
+# far more urgently to the same news than an unlevered pension fund.
+# Not applied to the 7d window because sustained leverage over multiple days
+# would compound fictitious signal strength beyond what the trait represents.
+_LEVERAGE_MULTIPLIERS = {
+    'none':     1.0,
+    '2x':       1.3,
+    '5x':       1.6,
+    '10x_plus': 2.0,
+}
+
+
+def _leverage_mult(leverage: str) -> float:
+    return _LEVERAGE_MULTIPLIERS.get((leverage or 'none').lower(), 1.0)
+
 
 def _reaction_score(reaction: str) -> float:
     return _REACTION_SCORES.get((reaction or '').lower(), 0.0)
 
 
-def compute_sentiment_scores(rows: list) -> dict:
+def compute_sentiment_scores(rows: list, apply_leverage: bool = False,
+                             equal_weighted: bool = False) -> dict:
     """
     Compute weighted sentiment score per asset class.
 
     Each row must have: asset_class, reaction, confidence (0-10), capital (USD).
+    Optional row fields: leverage (str) — used only when apply_leverage=True.
+
+    apply_leverage (bool): Multiply 24h weights by leverage multiplier.
+        True for 24h window only — leverage is a short-horizon amplifier.
+        False for 7d window (intentional asymmetry — do not change).
+    equal_weighted (bool): If True, ignore capital; weight = confidence only.
+        Shows what the unweighted agent majority thinks, regardless of AUM.
+
     Returns dict keyed by asset_class with {score: float, event_count: int}.
-    Score is in [-1, +1], weighted by capital * confidence.
+    Score is in [-1, +1].
     """
     buckets: dict = {}
     for row in rows:
         asset = row.get('asset_class') or 'unknown'
-        weight = (row.get('capital') or 0) * (row.get('confidence') or 0)
+        capital = row.get('capital') or 0
+        confidence = row.get('confidence') or 0
         score = _reaction_score(row.get('reaction', ''))
+
+        if equal_weighted:
+            # Equal-weighted: capital has no influence; confidence still matters
+            weight = float(confidence)
+        elif apply_leverage:
+            # Capital-weighted + short-horizon leverage amplifier (24h only)
+            lev = _leverage_mult(row.get('leverage', 'none'))
+            weight = float(capital) * float(confidence) * lev
+        else:
+            # Standard capital-weighted (default, used for 7d and backtest)
+            weight = float(capital) * float(confidence)
+
         if asset not in buckets:
             buckets[asset] = {'weighted_sum': 0.0, 'total_weight': 0.0, 'event_count': 0}
         buckets[asset]['weighted_sum'] += score * weight
@@ -58,6 +102,31 @@ def compute_sentiment_scores(rows: list) -> dict:
             'event_count': b['event_count'],
         }
     return result
+
+
+def _briefings_dir() -> Path:
+    """Return the briefings directory, trying both candidate paths."""
+    if _BRIEFINGS_DIR.is_dir():
+        return _BRIEFINGS_DIR
+    return _BRIEFINGS_DIR_ALT
+
+
+def _latest_sources_sidecar() -> list:
+    """
+    Return feed breakdown from the most recent *_sources.json sidecar file.
+    Written by news_fetcher.py alongside each briefing.
+    Returns [] if no sidecar exists.
+    """
+    d = _briefings_dir()
+    if not d.is_dir():
+        return []
+    sidecars = sorted(d.glob("*_sources.json"), reverse=True)
+    if not sidecars:
+        return []
+    try:
+        return json.loads(sidecars[0].read_text(encoding='utf-8'))
+    except Exception:
+        return []
 
 def _get_driver():
     global _driver_cache
@@ -213,6 +282,22 @@ def get_investor_stats():
                 gid=graph_id
             ).single()['c']
 
+            # Top 10 most recently seen non-synthetic entities (from latest briefing NER run)
+            # last_seen is set on every MERGE in incremental_update.py — most recent = latest briefing
+            top_entity_rows = session.run(
+                """
+                MATCH (e:Entity {graph_id: $gid})
+                WHERE (e.is_synthetic IS NULL OR e.is_synthetic = false)
+                  AND e.name IS NOT NULL
+                  AND e.type IS NOT NULL
+                RETURN e.name AS name, e.type AS type,
+                       coalesce(e.mention_count, 1) AS count
+                ORDER BY e.last_seen DESC, count DESC
+                LIMIT 10
+                """,
+                gid=graph_id
+            ).data()
+
         avg_data = {}
         if avgs:
             avg_data = {
@@ -226,6 +311,9 @@ def get_investor_stats():
                 'min_capital': round(avgs['min_capital'] or 0, 2),
                 'max_capital': round(avgs['max_capital'] or 0, 2),
             }
+
+        # Feed breakdown from latest news_fetcher sidecar file
+        feed_breakdown = _latest_sources_sidecar()
 
         return jsonify({
             "success": True,
@@ -253,6 +341,11 @@ def get_investor_stats():
                     for r in events
                 ],
                 "reaction_distribution": [{"reaction": r['reaction'], "count": r['c']} for r in reaction_dist],
+                "top_entities": [
+                    {"name": r['name'], "type": r['type'], "count": int(r['count'] or 1)}
+                    for r in top_entity_rows
+                ],
+                "feed_breakdown": feed_breakdown,
             }
         })
 
@@ -339,30 +432,35 @@ def list_agents():
 def get_sentiment():
     """
     Weighted sentiment score per asset class for the last 24 h and 7 days.
-    Weights each MemoryEvent by agent capital_usd * confidence.
-    Reactions map: buy→+1, hedge→+0.5, hold→0, sell→-1, panic→-1.
+
+    24h uses capital × confidence × leverage_multiplier (leverage amplifies
+    short-horizon signal weight). 7d uses capital × confidence only
+    (intentional asymmetry — leverage is a short-horizon amplifier only).
+
+    Also returns equal-weighted scores (weight = confidence only, capital
+    ignored) for both windows so the frontend can toggle the view.
+
     Query params: graph_id (required)
     """
     graph_id = request.args.get('graph_id')
     if not graph_id:
         return jsonify({"success": False, "error": "graph_id required"}), 400
 
+    # Fetch leverage_typical for the 24h leverage-weighted path
     _SENTIMENT_QUERY = """
         MATCH (a:Entity {graph_id: $gid, is_synthetic: true})-[:HAS_MEMORY]->(m:MemoryEvent)
         WHERE m.timestamp >= $since
         RETURN
-            a.asset_class_bias  AS asset_class,
-            m.reaction          AS reaction,
-            m.confidence        AS confidence,
-            a.capital_usd       AS capital
+            a.asset_class_bias   AS asset_class,
+            m.reaction           AS reaction,
+            m.confidence         AS confidence,
+            a.capital_usd        AS capital,
+            a.leverage_typical   AS leverage
     """
 
     try:
         driver = _get_driver()
         now = datetime.now(timezone.utc)
-        since_24h = (now.replace(hour=0, minute=0, second=0, microsecond=0)
-                        .isoformat().replace('+00:00', 'Z'))
-        # Simpler: just subtract seconds
         from datetime import timedelta
         ts_24h = (now - timedelta(hours=24)).isoformat()
         ts_7d  = (now - timedelta(days=7)).isoformat()
@@ -371,21 +469,32 @@ def get_sentiment():
             rows_24h = session.run(_SENTIMENT_QUERY, gid=graph_id, since=ts_24h).data()
             rows_7d  = session.run(_SENTIMENT_QUERY, gid=graph_id, since=ts_7d).data()
 
-        scores_24h = compute_sentiment_scores(rows_24h)
-        scores_7d  = compute_sentiment_scores(rows_7d)
+        # Capital-weighted (24h applies leverage multiplier; 7d does not)
+        scores_24h = compute_sentiment_scores(rows_24h, apply_leverage=True)
+        scores_7d  = compute_sentiment_scores(rows_7d,  apply_leverage=False)
 
-        all_assets = set(scores_24h) | set(scores_7d)
+        # Equal-weighted (confidence only, capital has no influence)
+        scores_24h_eq = compute_sentiment_scores(rows_24h, equal_weighted=True)
+        scores_7d_eq  = compute_sentiment_scores(rows_7d,  equal_weighted=True)
+
+        all_assets = set(scores_24h) | set(scores_7d) | set(scores_24h_eq) | set(scores_7d_eq)
         by_asset_class = {}
+        by_asset_class_equal = {}
         for asset in sorted(all_assets):
             by_asset_class[asset] = {
-                '24h': scores_24h.get(asset, {'score': 0.0, 'event_count': 0}),
-                '7d':  scores_7d.get(asset,  {'score': 0.0, 'event_count': 0}),
+                '24h': scores_24h.get(asset,    {'score': 0.0, 'event_count': 0}),
+                '7d':  scores_7d.get(asset,     {'score': 0.0, 'event_count': 0}),
+            }
+            by_asset_class_equal[asset] = {
+                '24h': scores_24h_eq.get(asset, {'score': 0.0, 'event_count': 0}),
+                '7d':  scores_7d_eq.get(asset,  {'score': 0.0, 'event_count': 0}),
             }
 
         return jsonify({
             "success": True,
             "data": {
-                "by_asset_class": by_asset_class,
+                "by_asset_class":       by_asset_class,
+                "by_asset_class_equal": by_asset_class_equal,
                 "generated_at": now.isoformat(),
             }
         })

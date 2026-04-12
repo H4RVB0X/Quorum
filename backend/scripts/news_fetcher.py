@@ -304,6 +304,24 @@ def fetch(dry_run: bool = False) -> Optional[Path]:
         return None
 
     write_briefing(all_articles, output_path)
+
+    # Write feed breakdown sidecar for the dashboard per-feed article volume chart.
+    # Counts all fetched articles (general_articles + cb_articles, before relevance
+    # filtering) so the chart reflects every feed that returned content, not just the
+    # articles that survived the filter.
+    # Path: briefings/YYYY-MM-DD_HHMM_sources.json alongside the .txt briefing.
+    try:
+        from collections import Counter as _Counter
+        source_counts = _Counter(a['source'] for a in general_articles + cb_articles)
+        sidecar = [{"source": s, "count": c}
+                   for s, c in source_counts.most_common()]
+        sidecar_path = output_path.with_name(output_path.stem + "_sources.json")
+        sidecar_path.write_text(
+            json.dumps(sidecar, indent=2), encoding="utf-8"
+        )
+    except Exception as e:
+        logger.warning(f"Sidecar sources write failed: {e} — feed breakdown will be unavailable")
+
     logger.info(
         f"Briefing written: {output_path} "
         f"({len(all_articles)} articles — {len(filtered_articles)} general, {len(cb_articles)} central bank)"

@@ -24,6 +24,8 @@ Every 30 minutes, an autonomous pipeline:
 
 A daily job at 03:00 runs the full tick across all 8,192 agents.
 
+On startup and after every job completes, the scheduler runs a catch-up check: if the daily job hasn't run today (UTC) and it is past 03:00 UTC, it fires immediately; if the last half-hourly tick finished more than 30 minutes ago (or no record exists), it fires immediately. Daily always takes priority. Every job completion — success or error — is appended to `backend/logs/scheduler_runs.json` as a permanent audit trail (capped at 10,000 entries).
+
 The resulting sentiment scores — weighted by agent capital and conviction — feed a live dashboard showing trading signals, sentiment charts, agent distributions, and a real-time memory event feed.
 
 ---
@@ -33,7 +35,8 @@ The resulting sentiment scores — weighted by agent capital and conviction — 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                        scheduler.py                              │
-│     APScheduler — 30-min news+tick job, 03:00 daily full run    │
+│  APScheduler — 30-min news+tick job, 03:00 daily full run       │
+│  Catch-up on startup + after each job · run log in backend/logs │
 └──────┬─────────────────────┬───────────────────────┬────────────┘
        │                     │                       │
   news_fetcher.py    incremental_update.py    simulation_tick.py
@@ -47,15 +50,21 @@ The resulting sentiment scores — weighted by agent capital and conviction — 
                      │  MemoryEvents  │         └──────────────┘
                      └───────┬────────┘
                              │
-              ┌──────────────▼──────────────┐
-              │         Flask API            │
-              │  /api/investors/sentiment    │
-              │  /api/signals/current        │
-              │  /api/signals/history        │
-              │  /api/investors/stats        │
-              │  /api/investors/agents       │
-              │  /dashboard                  │
-              └──────────────────────────────┘
+  ┌──────────────────────────┴───────────────────────────────────┐
+  │                                                              │
+  ▼                                                              ▼
+┌─────────────────────────────────┐   ┌──────────────────────────────────┐
+│         Flask API               │   │      dashboard_refresh.py        │
+│  /api/investors/sentiment       │   │  Separate process — 15-min write │
+│  /api/signals/current           │   │  Queries Neo4j + yfinance        │
+│  /api/signals/history           │   │  Writes backend/live_state.json  │
+│  /api/signals/backtest          │   └──────────────┬───────────────────┘
+│  /api/signals/sentiment_history │                  │
+│  /api/investors/stats           │   ┌──────────────▼───────────────────┐
+│  /api/investors/agents          │   │  GET /api/live/state             │
+│  /api/live/state (file read)    │   │  Pure file read — no Neo4j       │
+│  /dashboard                     │   │  503 if file missing             │
+└─────────────────────────────────┘   └──────────────────────────────────┘
 ```
 
 ---
@@ -139,6 +148,22 @@ Each article URL is SHA-256 hashed and checked against a deduplication store (30
 
 Chunks each briefing and runs spaCy (`en_core_web_sm`) NER to extract named entities — organisations, people, locations, financial figures, and more — then batch-MERGEs them into Neo4j via `UNWIND` in batches of 500. No LLM calls are made during this step; the full pipeline completes in under 2 minutes regardless of briefing length. A `CASE WHEN is_synthetic` guard in the Cypher prevents news-extracted entities from ever overwriting synthetic agent node properties — so a news article mentioning "Tesla" can't corrupt an agent node that happens to share a lowercased name.
 
+Before writing to Neo4j, three noise filters are applied:
+- **`ENTITY_REMOVE_LIST`** — financial metrics (EBITDA, GDP, CPI…), role acronyms (CEO, CFO…), ticker symbols (SPY, QQQ…), and FX/crypto codes (USD, EUR, BTC…) are dropped entirely
+- **Minimum name length** — names shorter than 3 characters are discarded
+- **Single-token Person names** — Person entities with no space in the name (e.g. "Matt" without a surname) are dropped as unreliable partial matches
+
+### Sentiment Snapshots
+
+After all agents in a tick are processed, `simulation_tick.py` writes a `SentimentSnapshot` node to Neo4j containing:
+- Exact tick timestamp
+- Per-asset capital-weighted sentiment scores
+- Reaction distribution (% buy/sell/hold/hedge/panic)
+- Total agents processed
+- Fear/greed score (0–100, where 50 = neutral)
+
+These snapshots power the tick-level chart and reaction distribution chart on the dashboard. At 30-min cadence, 48 hours = ~96 data points.
+
 ### Simulation Tick
 
 For each sampled agent:
@@ -172,7 +197,7 @@ Daily closing prices for 7 asset-class proxies via yfinance:
 
 ### Sentiment Scoring
 
-All `MemoryEvent` nodes from the last 24h and 7 days are queried. Each event is weighted by `capital_usd × confidence`. Reactions map to scores:
+All `MemoryEvent` nodes from the last 24h and 7 days are queried. Each event is weighted by `capital_usd × confidence`. For the 24h window, an additional leverage multiplier is applied (`none=1.0×`, `2x=1.3×`, `5x=1.6×`, `10x_plus=2.0×`) — leverage amplifies short-horizon signal weight. The 7d window uses no leverage multiplier (intentional asymmetry). An equal-weighted path (weight = confidence only, capital ignored) is also computed and returned alongside the capital-weighted scores. Reactions map to scores:
 
 | Reaction | Score |
 |---|---|
@@ -200,18 +225,35 @@ Also returns `price_change_24h` (% vs previous day's close) per asset class.
 
 ## The Dashboard
 
-Served at `/dashboard` by Flask.
+Served at `/dashboard` by Flask. Single self-contained HTML file — all CSS and JS inline, CDN imports only (Google Fonts, Chart.js, chartjs-plugin-zoom). Terminal-style dark aesthetic (Inter + IBM Plex Mono, deep navy with cyan/green/purple accents).
 
-- **Trading signals** — current bullish/bearish/neutral signal per asset class with sentiment score and 24h price change
-- **Pool stats** — agent count, total memory events, pool composition
-- **Sentiment chart** — 24h scores across all asset classes (bar chart)
-- **History chart** — 30-day sentiment + price overlay for a selected asset class (line chart)
-- **Distributions** — archetype, strategy, fear/greed, asset bias, leverage (doughnut/bar charts)
-- **Fear/greed gauge** — overall market sentiment dial
-- **Memory event feed** — 20 most recent agent reactions with archetype, reaction type, confidence, and reasoning text
-- **Agent table** — sortable/filterable table with archetype filter tabs
+### Layout
 
-Auto-refreshes every 30 seconds.
+**Header** — logo, 7 market-state dots (green/red/amber per asset), status, last tick age, live timestamp, refresh button.
+
+**Signal strip** — horizontal row of 7 asset tiles, each showing: signal badge, live price, 24h change, sentiment score, 2px coloured indicator bar. Horizontal-scrolls on mobile.
+
+**Sidebar + Main split** (desktop flex, column on mobile):
+- Sidebar (260px sticky): pool stats (agents, events, avg risk/capital/sensitivity/loss-aversion), fear/greed gauge + 48-tick sparkline, top entities list, article sources bar chart
+- Main: tick sentiment chart, reaction distribution chart, sentiment vs price history, 2×2 distribution charts, memory event feed
+
+**Agent table** — full-width below the split; archetype filter tabs, 200 agents.
+
+### Features
+
+- **Alert strip** — auto-detects sentiment shift ≥±0.25 in a 2h window; shows dismissable chips. Session-deduped.
+- **Tick-level sentiment chart** — per-asset sentiment from `SentimentSnapshot` nodes; capital-weighted / equal-weighted toggle; 48h / 30d window; scroll/pinch zoom + pan
+- **Reaction distribution** — stacked area chart of buy/sell/hold/hedge/panic % over time; zoom/pan
+- **Sentiment vs Price History** — 30-day dual-axis (sentiment + price Δ%) per selected asset
+- **Distributions** — archetype, risk histogram, strategy, asset bias bar charts
+- **Fear/greed gauge** — pool trait distribution dial
+- **Memory event feed** — 20 most recent agent reactions with archetype, confidence, reasoning
+- **Top entities** — top 10 non-synthetic entities from NER with mention count
+- **Feed breakdown** — article counts per news source (from `_sources.json` sidecar)
+- **Prices stale badge** — shown when yfinance fails; auto-hides when live prices return
+- **Header health indicators** — tick age ("14m ago") and live state timestamp for remote monitoring
+
+Auto-refreshes every 30 seconds (full API). 15-minute live state overlay from `dashboard_refresh.py`.
 
 ---
 
@@ -227,6 +269,7 @@ Quorum/
 │   │   ├── api/
 │   │   │   ├── investors.py          # /api/investors/* — stats, agents, sentiment
 │   │   │   ├── signals.py            # /api/signals/* — current signals, history
+│   │   │   ├── live.py               # /api/live/state — serves live_state.json (no Neo4j)
 │   │   │   ├── graph.py              # Knowledge graph API routes
 │   │   │   ├── simulation.py         # OASIS simulation routes
 │   │   │   └── control.py            # Pipeline control endpoints
@@ -240,13 +283,18 @@ Quorum/
 │   │       └── report_agent.py
 │   ├── scripts/
 │   │   ├── generate_agents.py        # Generate 8,192 synthetic investor agents
-│   │   ├── news_fetcher.py           # RSS polling + briefing writer
+│   │   ├── news_fetcher.py           # RSS polling + briefing writer + sources sidecar
 │   │   ├── incremental_update.py     # NER extraction + Neo4j MERGE
-│   │   ├── simulation_tick.py        # Per-agent LLM reaction pass
+│   │   ├── simulation_tick.py        # Per-agent LLM reaction pass + SentimentSnapshot writer
 │   │   ├── price_fetcher.py          # yfinance daily price snapshot
-│   │   └── scheduler.py              # APScheduler orchestrator
+│   │   ├── backtester.py             # Signal accuracy backtest (per-asset, per-archetype, calibration)
+│   │   ├── verify_agent_diversity.py # 8-check diversity audit (incl. reaction diversity Check 8)
+│   │   ├── scheduler.py              # APScheduler orchestrator (simulation pipeline)
+│   │   └── dashboard_refresh.py      # Separate process — writes live_state.json every 15 min
 │   ├── briefings/                    # Timestamped news briefing files
+│   ├── logs/                         # scheduler_runs.json — append-only job audit log
 │   ├── prices/                       # Daily price snapshots (JSON)
+│   ├── live_state.json               # Live dashboard state — written by dashboard_refresh.py
 │   └── tests/
 │       ├── test_sentiment.py
 │       └── test_traits.py

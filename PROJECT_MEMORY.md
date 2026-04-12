@@ -731,3 +731,554 @@ docker cp backend/scripts/news_fetcher.py mirofish-offline:/app/backend/scripts/
 docker restart mirofish-offline
 ```
 (Already deployed in this session.)
+
+---
+
+## Session: 2026-04-11 — Signal Backtesting, SentimentSnapshot, Leverage Weighting, Dashboard Overhaul
+
+### What was built
+
+**`backend/scripts/backtester.py`** (new file)
+Standalone backtesting module. One bulk Neo4j query fetches all MemoryEvents from the last N days; events are grouped by date in Python. For each day with price data, computes: per-asset signal accuracy, per-archetype accuracy, rolling 7-day accuracy, confidence calibration (tiers 1-3 / 4-6 / 7-8 / 9-10). Used by `GET /api/signals/backtest?graph_id=...&days=30`.
+
+**`backend/scripts/verify_agent_diversity.py`** (extended)
+Added **Check 8: Reaction Diversity** (last 7 days). Queries MemoryEvent nodes from last 7 days, groups by archetype, flags mode collapse if any single reaction >60% of events. Computes Pearson correlation between `risk_tolerance` and reaction direction (`buy=+1, hold=0, hedge=-0.5, sell=-1, panic=-2`). Prints a summary table. Integrated into `run_audit()`. Added `defaultdict` and `timedelta` imports.
+
+**`backend/app/api/investors.py`** (extended)
+1. `compute_sentiment_scores()` gains `apply_leverage` and `equal_weighted` params. Leverage multipliers: `none=1.0, 2x=1.3, 5x=1.6, 10x_plus=2.0`. Applied to 24h only (intentional asymmetry — do not change for 7d).
+2. `GET /api/investors/sentiment` returns both `by_asset_class` (capital-weighted) and `by_asset_class_equal` (equal-weighted).
+3. `GET /api/investors/stats` includes `top_entities` (10 most recently NER-merged entities) and `feed_breakdown` (from latest `_sources.json` sidecar).
+
+**`backend/scripts/simulation_tick.py`** (extended)
+After the agent loop, calls `write_sentiment_snapshot()` which writes a `SentimentSnapshot` node to Neo4j via MERGE on (graph_id, timestamp). Contains: per-asset sentiment (7 classes), reaction distribution %, total_agents, fear_greed_score (0=fear, 50=neutral, 100=greed). Do not remove this call — it powers the tick-level dashboard chart.
+
+**`backend/app/api/signals.py`** (extended)
+Two new endpoints: `GET /api/signals/backtest?graph_id=...&days=30` and `GET /api/signals/sentiment_history?graph_id=...&hours=48`.
+
+**`backend/scripts/news_fetcher.py`** (extended)
+Writes `briefings/YYYY-MM-DD_HHMM_sources.json` sidecar with `[{source, count}]` after each briefing.
+
+**`frontend/public/dashboard.html`** (major extension — all existing panels preserved)
+Tick-level sentiment chart (Chart.js + zoom/pan) with capital/equal-weighted toggle; reaction distribution stacked area chart; fear/greed sparkline; top entities panel; feed breakdown chart; Hammer.js + chartjs-plugin-zoom added via CDN.
+
+### SentimentSnapshot node schema
+Properties: `graph_id`, `timestamp` (ISO), `equities`, `crypto`, `bonds`, `commodities`, `fx`, `real_estate`, `mixed` (all floats), `buy_pct`, `sell_pct`, `hold_pct`, `hedge_pct`, `panic_pct`, `total_agents` (int), `fear_greed` (float 0-100; 50=neutral). MERGE key: composite (graph_id, timestamp).
+
+### Gotchas for next session
+- **SentimentSnapshot nodes will only populate after the next tick runs** — tick-level chart shows empty until then
+- **Leverage in 24h only** — `apply_leverage=True` in `get_sentiment()` 24h path only. 7d always False. Intentional.
+- **Hedge direction in Check 8 correlation is negative** — `hedge=-0.5` (risk-off). Different from sentiment score `hedge=+0.5`.
+- **backtester.py import path** in signals.py: `os.path.normpath(os.path.join(dirname, '..', '..', 'scripts'))` from `backend/app/api/`.
+- **Equal-weighted toggle is UI-ready** but renders same (capital-weighted) snapshot data — snapshots only store capital-weighted scores. Full equal-weighted tick-level view requires adding separate fields to SentimentSnapshot.
+- **Entity mention_count always 1** — BATCH_MERGE_ENTITY_QUERY in incremental_update.py doesn't increment a counter yet.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/backtester.py` | NEW — standalone backtest module |
+| `backend/scripts/verify_agent_diversity.py` | Check 8 reaction diversity added |
+| `backend/app/api/investors.py` | Leverage multiplier, equal-weighted, top_entities, feed_breakdown |
+| `backend/scripts/simulation_tick.py` | SentimentSnapshot writer added |
+| `backend/app/api/signals.py` | /backtest and /sentiment_history endpoints added |
+| `backend/scripts/news_fetcher.py` | _sources.json sidecar write added |
+| `frontend/public/dashboard.html` | 6 new panels + zoom plugin |
+| `ROADMAP.md` | Completed items removed, new items added |
+| `CLAUDE.md` | New gotchas: SentimentSnapshot, leverage, sidecar, backtester, Check 8 |
+| `README.md` | New endpoints, SentimentSnapshot section, updated dashboard section |
+
+---
+
+## Session: 2026-04-12 — Scheduler Run Log + Catch-up Logic + Dashboard Mobile Polish
+
+### What was built
+
+**`backend/scripts/scheduler.py`** (significant extension)
+
+Two features added to the APScheduler orchestrator:
+
+#### 1. Persistent run log (`backend/logs/scheduler_runs.json`)
+Every time a job completes — whether success or error — a JSON entry is appended:
+```json
+{
+  "job_type": "halfhourly" | "daily",
+  "started_at": "2026-04-12T03:00:00+00:00",
+  "finished_at": "2026-04-12T03:18:44+00:00",
+  "status": "success" | "error",
+  "error": null | "error message string"
+}
+```
+- `LOGS_DIR = backend/logs/`, `LOGS_PATH = backend/logs/scheduler_runs.json`
+- `_ensure_logs_dir()` creates the directory if missing
+- `append_run_log()` reads, appends, trims to `MAX_LOG_ENTRIES = 10_000`, writes back atomically
+- Entry is written in the `finally` block of each job — a crash mid-job produces no entry (gap detectable)
+- `_last_run_of_type(job_type)` iterates entries in reverse and returns the most recent match
+
+#### 2. Catch-up logic (`run_catchup()`)
+Called on scheduler startup AND at the end of every job (in the `finally` block).
+
+**Step 1 — daily overdue check**: if current UTC hour ≥ 3 and the most recent `daily` log entry has a `finished_at` date before today (UTC), run the daily job immediately.
+**Step 2 — halfhourly overdue check**: if the most recent `halfhourly` log entry is more than 1800 seconds old (or no entry exists), run the halfhourly job immediately.
+
+Priority: daily always runs before halfhourly. If both are overdue, daily runs first; then the halfhourly check re-runs and fires if still overdue.
+
+Re-entrance guard: `_catchup_running` threading.Event prevents recursive invocations. When a job called from `run_catchup` finishes and tries to call `run_catchup` again, the guard blocks it silently.
+
+#### Startup behaviour change
+`next_run_time=datetime.now(timezone.utc)` removed from the half-hourly APScheduler job. Catch-up now handles the "run immediately on startup" case. If the last halfhourly was < 30 min ago, nothing fires immediately and the next tick waits for the normal interval.
+
+### Architecture decisions
+- **Write log in `finally`, not on return** — ensures every exit path (including early-return on Neo4j failure or missing briefings) writes a log entry. The `error` variable is set at job scope; `finally` reads it.
+- **10,000-entry cap** — at 48 entries/day (30-min cadence) + 1 daily, the log fills at ~200 days before trimming. Ample for audit without unbounded growth.
+- **Re-entrance guard, not a lock** — a `threading.Lock()` would deadlock: `daily_job` holds the lock, calls `run_catchup`, which tries to call `daily_job`, which tries to acquire the lock. The guard approach lets the outer catch-up complete sequentially without blocking.
+- **`_daily_running` mutex already covers catch-up** — `hourly_job` checks `_daily_running` at its first line. If catch-up calls `daily_job` (which sets `_daily_running`) and then tries to call `hourly_job`, the hourly_job check sees the flag... but this can't actually happen because catch-up runs daily first, then halfhourly; `_daily_running` is cleared in `daily_job`'s `finally` before `run_catchup` returns and checks halfhourly.
+
+**`frontend/public/dashboard.html`** (CSS mobile improvements)
+- Added `flex-wrap:wrap` to `.hdr-right` at 600px so the status dot, updated time, and refresh button all wrap rather than overflow
+- `card-header` wraps at 600px (`flex-wrap:wrap;gap:4px`) — count label drops below title on narrow screens
+- `ev-reason` gets `word-break:break-word` — long reasoning text won't overflow on mobile
+- `chart-wrap-xs` height increased from 120px to 160px at 600px — feed breakdown chart is more readable
+- `fg-num` reduced to 17px and `fg-nums` gets `flex-wrap:wrap;justify-content:center` — prevents fear/greed numbers overflowing the card at narrow widths
+- `reset-zoom-btn` loses `margin-left:auto` on mobile (was pushing to far right causing awkward wrapping)
+- `asset-tab` padding reduced to `3px 8px` at 600px — more tabs fit per row
+- New **400px breakpoint**: signals grid goes 1-column, header items stack vertically, main padding reduces to 8px
+
+### Gotchas for next session
+- **`backend/logs/` directory is new** — created at runtime by `_ensure_logs_dir()`. Not committed to git (add to `.gitignore` if desired, or let Docker manage it).
+- **Log file path is inside the container** — on the host it is `backend/logs/scheduler_runs.json`. On the Docker container it is `/app/backend/logs/scheduler_runs.json`. Read it with: `docker exec mirofish-offline cat /app/backend/logs/scheduler_runs.json`.
+- **`next_run_time` removed** — on a fresh scheduler restart where the last halfhourly was < 30 min ago, no immediate tick fires. This is intentional (catch-up logic determines necessity). If you want the old "always fire on startup" behaviour back, add `next_run_time=datetime.now(timezone.utc)` back to the `add_job()` call.
+- **Catch-up daily condition is UTC-hour-based** — the scheduled daily job runs at 03:00 Europe/London time. If London is UTC+1 (summer), the catch-up fires at 02:00 UTC (hour ≥ 3 fails) but the APScheduler fires at 02:00 UTC+1. In practice this means catch-up won't catch up the daily in summer until 03:00 UTC — up to 1 hour after the APScheduler would have fired it. Acceptable for now.
+- **Equal-weighted toggle on tick chart is cosmetic** — toggle button changes `_sentimentMode` but the snapshot data only contains capital-weighted scores. Full fix requires storing separate equal-weighted fields in `SentimentSnapshot`.
+
+### New files / folders
+| Path | Purpose |
+|------|---------|
+| `backend/logs/` | Created at runtime; contains `scheduler_runs.json` |
+| `backend/logs/scheduler_runs.json` | Append-only run log; capped at 10,000 entries |
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/scheduler.py` | `append_run_log`, `_last_run_of_type`, `_ensure_logs_dir`, `run_catchup`; log writes in both job `finally` blocks; `run_catchup` call at end of both jobs and in `main()`; `next_run_time` removed from half-hourly job |
+| `frontend/public/dashboard.html` | Responsive CSS improvements at 600px and new 400px breakpoint |
+
+### Setup needed
+```bash
+docker cp backend/scripts/scheduler.py mirofish-offline:/app/backend/scripts/scheduler.py
+docker cp frontend/public/dashboard.html mirofish-offline:/app/frontend/public/dashboard.html
+docker restart mirofish-offline
+```
+(Already deployed in this session.)
+
+---
+
+## Session: 2026-04-12 — Consistent Y-axes + 30-day Full-Resolution Sentiment Chart
+
+### What was built
+
+**`backend/app/api/signals.py`** — extended `sentiment_history` endpoint:
+- Accepts `days` parameter as alternative to `hours` (e.g. `?days=30` returns 720–1440 snapshots at 30-min cadence)
+- If both `hours` and `days` are supplied, `hours` takes precedence
+- Hard cap: `LIMIT 2000` added to Cypher; `capped: true` set in response and WARNING logged if hit
+- Default (`hours=48`) unchanged — existing callers unaffected
+
+**`frontend/public/dashboard.html`** — two chart improvements:
+
+#### 1. Consistent y-axes
+`renderTickSentChart()` now computes global min/max across all assets and all snapshots before rendering. 5% padding added each side, clamped to `[-1, +1]`. Both the capital-weighted and equal-weighted views share the same computed scale. Previously hardcoded `y: {min:-1, max:1}`.
+
+#### 2. Time-window toggle (48h / 30d)
+`48h | 30d` button pair added to tick chart header (right-aligned, alongside `reset zoom`). State in `_tickWindow`. `30d` calls `sentiment_history?days=30`. Adaptations for the dense 30d view:
+- Title updates to "Sentiment — Full Resolution (30d)"
+- `pointRadius: 0` when dataset > 200 points (no dot clutter)
+- `maxTicksLimit: 30` (daily boundaries)
+- `_fmtTickLabel()` date-only in 30d mode
+- Count label appends "(cap reached)" if 2000-point limit hit
+
+### Architecture decisions
+- Global y-bounds computed in JS — simpler, no extra API contract, updates interactively on mode switch
+- 5% proportional padding keeps tight clusters readable without wasting space
+- `days` × 24 = hours server-side — same query, same index, no new Cypher
+- `LIMIT 2000` in Cypher — Neo4j bounds result before wire transfer
+- `zoom-hint` text hidden on mobile — saves space; touch gestures still work
+
+### Gotchas for next session
+- **`capped: true` means data was truncated** — at 30-min cadence, 2000 snapshots ≈ 42 days. Increase `_SENTIMENT_HISTORY_LIMIT` in `signals.py` if needed.
+- **Y-axis bounds recompute on every render** — capital and equal toggles use the same snapshot `assets` field (capital-weighted only in snapshot schema). Bounds are identical for both modes until equal-weighted is added to `SentimentSnapshot`.
+- **`pointRadius: 0` above 200 snapshots** — 48h view (~96 points) still shows dots; 30d does not.
+- **Zoom state persists across re-renders** — `tickSentChart.update()` preserves Chart.js zoom. Use `reset zoom` to return to full view after switching windows.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/app/api/signals.py` | `days` param; `LIMIT 2000` cap; `capped` field in response |
+| `frontend/public/dashboard.html` | Global y-axis bounds; `48h/30d` toggle; `setTickWindow()`; `_tickWindow` state; `.zoom-hint`; `.toggle-row-right` CSS; mobile rule updates |
+
+### Setup needed
+```bash
+docker cp backend/app/api/signals.py mirofish-offline:/app/backend/app/api/signals.py
+docker cp frontend/public/dashboard.html mirofish-offline:/app/frontend/public/dashboard.html
+docker restart mirofish-offline
+```
+(Already deployed in this session.)
+
+---
+
+## Session: 2026-04-12 — Dashboard Live State Refresh (dashboard_refresh.py)
+
+### What was built
+
+**`backend/scripts/dashboard_refresh.py`** (new file)
+Standalone blocking process that writes `backend/live_state.json` every 15 minutes. Runs independently of `scheduler.py` — it is NOT imported by the scheduler.
+
+Data sections per refresh (each independent with try/except):
+- **Prices**: yfinance live fetch (same ASSET_TICKERS as price_fetcher.py). Failure: fallback to most recent price file + `prices_stale: true`.
+- **Sentiment**: Neo4j 24h query, capital-weighted with leverage + equal-weighted (mirrors investors.py, inlined to avoid Flask imports).
+- **Reaction distribution**: Latest SentimentSnapshot — fractions times 100 = percentages.
+- **Signals**: Derived from sentiment scores (>0.4=bullish, <-0.4=bearish). No extra DB round-trip.
+- **Top entities**: 10 most recently seen non-synthetic Entity nodes.
+- **Recent events**: 10 most recent MemoryEvents.
+- **Pool stats**: pool_size, total_memory_events, fear/greed counts from agent trait distribution.
+- **Feed breakdown**: Most recent `*_sources.json` sidecar (file read).
+- **Last tick/daily**: `backend/logs/scheduler_runs.json` (file read).
+
+Neo4j failure: `RETURN 1` test query on startup. Failure → return early, existing file unchanged. Individual query failures → WARNING logged, section omitted, write continues.
+Writes atomically: tmp file → rename.
+
+**`backend/app/api/live.py`** (new file)
+Flask blueprint at `/api/live/state`. Pure file read of `backend/live_state.json`. Returns 503 if file missing.
+
+**`backend/app/__init__.py`** — registered `live_bp` at `/api/live`.
+
+**`frontend/public/dashboard.html`** — added `fetchLiveState()` (15-min overlay): maps live state to all existing renderers (`renderSignals`, `updateFG`, `updateEvents`, `renderTopEntities`, `renderFeedBreakdown`); updates stat-agents/stat-events; shows "Prices delayed" stale badge; shows "live data: HH:MM:SS" in header; triggers `fetchTickSentimentHistory()` for chart re-fetch. Existing 30s `fetchAll()` unchanged.
+
+### Architecture decisions
+- **Inlined sentiment logic** — mirrors `investors.py` to avoid Flask imports. Keep in sync if `investors.py` logic changes.
+- **Atomic write** — prevents Flask endpoint from reading a half-written file.
+- **Signals derived, not queried** — no extra DB call; same threshold as `signals.py`.
+- **`fetchLiveState()` triggers `fetchTickSentimentHistory()`** — live state has only the latest snapshot, not full tick history.
+- **`/api/live/state` ignores graph_id** — file is always for the single configured graph_id.
+
+### Startup commands (both processes required)
+Terminal 1 (simulation pipeline):
+  python backend/scripts/scheduler.py --graph-id d3a38be8-37d9-4818-be28-5d2d0efa82c0
+
+Terminal 2 (live state refresher):
+  python backend/scripts/dashboard_refresh.py --graph-id d3a38be8-37d9-4818-be28-5d2d0efa82c0
+
+### live_state.json schema
+Location: `backend/live_state.json` (host) / `/app/backend/live_state.json` (container)
+
+Keys: `refreshed_at`, `prices`, `prices_stale` (only when stale), `price_changes_24h`, `sentiment` (by_asset_class / by_asset_class_equal / fear_greed string), `reaction_distribution` (0-100 pct), `signals` (direction/confidence/price/change_24h), `top_entities`, `recent_events`, `pool_stats` (pool_size/total_memory_events/fear_count/greed_count), `feed_breakdown`, `last_tick_at`, `last_daily_at`.
+
+### Gotchas for next session
+- **Two processes, two terminals** — `scheduler.py` + `dashboard_refresh.py` both must run.
+- **`dashboard_refresh.py` is NOT a scheduler job** — completely separate process. Do not add it as a job inside scheduler.py.
+- **`prices_stale` absent when prices are live** — JS `s.prices_stale` is `undefined` (falsy) when absent; badge hides correctly.
+- **`reaction_distribution` is percentages (x100)** — SentimentSnapshot stores fractions 0-1; multiplied on write. Do not double-multiply in the frontend.
+- **`fear_greed` string** from mean capital-weighted 24h sentiment: >0.15 = "greed", <-0.15 = "fear", else "neutral". Different from pool trait distribution counts used for the gauge needle.
+- **`fetchLiveState()` is additive** — 30s `fetchAll()` remains source of truth for averages, agent table, history chart.
+- **Inlined sentiment computation** — `compute_sentiment_capital_weighted()` and `compute_sentiment_equal_weighted()` in `dashboard_refresh.py` mirror `investors.py`. If leverage multipliers or reaction scores change in investors.py, update both.
+
+### Deploy
+```
+docker cp backend/scripts/dashboard_refresh.py mirofish-offline:/app/backend/scripts/dashboard_refresh.py
+docker cp backend/app/api/live.py mirofish-offline:/app/backend/app/api/live.py
+docker cp backend/app/__init__.py mirofish-offline:/app/backend/app/__init__.py
+docker cp frontend/public/dashboard.html mirofish-offline:/app/frontend/public/dashboard.html
+docker restart mirofish-offline
+```
+
+### New files
+| Path | Purpose |
+|------|---------|
+| `backend/scripts/dashboard_refresh.py` | Standalone 15-min live state writer |
+| `backend/app/api/live.py` | `/api/live/state` blueprint — file read only, no Neo4j |
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/app/__init__.py` | Registered `live_bp` at `/api/live` |
+| `frontend/public/dashboard.html` | `fetchLiveState()`, stale badge, live timestamp, 15-min interval |
+| `CLAUDE.md` | Dashboard Live State Gotchas section added |
+| `README.md` | Architecture diagram, project structure, new endpoint |
+
+---
+
+## Session: 2026-04-12 — dashboard_refresh.py: Fix Neo4j DNS Failure (root .env)
+
+### Problem
+`dashboard_refresh.py` was failing with "Failed to DNS resolve address neo4j:7687" because `_get_neo4j_driver()` used `os.environ.get("NEO4J_URI", "bolt://neo4j:7687")` with no `.env` loaded. The default fallback was a Docker service name, which is only resolvable inside the Docker network. The script runs on the host.
+
+### Fix
+Two changes to `backend/scripts/dashboard_refresh.py`:
+
+1. **Load root `.env` at startup** — added `dotenv.load_dotenv` block immediately after the path constants, loading `MiroFish-Offline/.env` (= `Path(__file__).parent.parent.parent / ".env"`). This is the same `.env` that `config.py` loads (via `../../.env` from `backend/app/`) and contains `NEO4J_URI=bolt://localhost:7687`. `backend/.env` is deliberately NOT loaded.
+
+2. **Changed default fallback in `_get_neo4j_driver()`** — from `"bolt://neo4j:7687"` to `"bolt://localhost:7687"` to match the host-script convention even if dotenv is not installed.
+
+No Ollama URL needed in this script — it does not use Ollama at all.
+
+### Pattern (for future host scripts)
+All scripts that run on the host (not inside the Docker container) must load the root `.env`:
+```python
+from dotenv import load_dotenv
+_root_env = Path(__file__).parent.parent.parent / ".env"  # MiroFish-Offline/.env
+if _root_env.exists():
+    load_dotenv(_root_env, override=True)
+```
+Default fallbacks must use `localhost`, never `neo4j` or `ollama`.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/dashboard_refresh.py` | Root .env loading block; `_get_neo4j_driver()` default changed to `bolt://localhost:7687` |
+| `CLAUDE.md` | Root .env note added to Dashboard Live State Gotchas |
+
+---
+
+## Session: 2026-04-12 — Sidecar Fix, mention_count, Entity Type Corrections, Panic Threshold
+
+### What was built / fixed
+
+Four targeted fixes across three files.
+
+#### Fix 1 — Sidecar counts all fetched articles (news_fetcher.py)
+The feed breakdown sidecar was only showing 2 feeds because it counted `all_articles` (post-relevance-filter), not the full set of fetched articles. Most general feeds (Reuters, CNBC, MarketWatch, FT, AP Business) were being filtered out by the relevance filter before being counted. Central bank feeds were included via `cb_articles` so they could theoretically appear, but often return 0 new items.
+
+Fix: changed the Counter in the sidecar write block from `all_articles` to `general_articles + cb_articles` (pre-filter counts per source). The sidecar now reflects every feed that returned content, not just what survived the relevance filter.
+
+#### Fix 5 — Persist mention_count to Entity nodes (incremental_update.py)
+The top_entities panel was showing `count: 1` for every entity because `mention_count` was never written to Neo4j. The property exists on the dashboard query but the value was never populated.
+
+Fix:
+- In `process_briefing()`: track `mention_count` in `global_entities`. On first appearance: set to 1. On subsequent appearances (same entity across multiple chunks): increment.
+- In `batch_merge_entities()` payload: added `"mention_count": int(e.get("mention_count", 1))`.
+- In `BATCH_MERGE_ENTITY_QUERY`: added `n.mention_count = e.mention_count` in both ON CREATE and ON MATCH (with `is_synthetic` guard on MATCH).
+
+Note: mention_count tracks chunk-level appearances (each entity deduped per chunk by `extract_entities_spacy`). An entity appearing in 5 different chunks gets `mention_count=5`.
+
+#### Fix 6 — spaCy entity type corrections (incremental_update.py)
+spaCy often misclassifies well-known finance entities (e.g., "Bloomberg" as PERSON, "Fed" as GPE/NORP, "Nasdaq" as ORG but different context). Added `ENTITY_TYPE_CORRECTIONS` dict and applied it after `SPACY_LABEL_MAP[label]` in `extract_entities_spacy`.
+
+Corrections applied before per-chunk deduplication. Dict overrides the spaCy-derived type with the correct one for known misclassifications:
+`Bloomberg, Reuters, CNBC, MarketWatch, Qualcomm, Intel, AMD, Nasdaq, NYSE, Fed, Federal Reserve` → `"Company"`
+
+#### Fix 7 — Panic threshold (simulation_tick.py)
+The old panic definition was vague ("liquidating positions due to acute fear of imminent loss") which the model couldn't reliably reach — it defaulted to `hedge` as a generic cautious response. Replaced with a scenario-conditional definition listing explicit triggers: "market crash, circuit breaker, trading halt, emergency rate hike, bank collapse, war escalation, systemic crisis." Added "you do not think — you react" and "panic is your most likely response" to make it the clear default for retail archetypes when triggers are present.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/news_fetcher.py` | Sidecar Counter uses `general_articles + cb_articles` instead of `all_articles` |
+| `backend/scripts/incremental_update.py` | `ENTITY_TYPE_CORRECTIONS` dict; applied in `extract_entities_spacy`; `mention_count` tracking in `process_briefing`; payload + Cypher updated |
+| `backend/scripts/simulation_tick.py` | `panic` definition rewritten with explicit scenario triggers |
+
+### Deploy
+```bash
+docker cp backend/scripts/news_fetcher.py mirofish-offline:/app/backend/scripts/news_fetcher.py
+docker cp backend/scripts/incremental_update.py mirofish-offline:/app/backend/scripts/incremental_update.py
+docker cp backend/scripts/simulation_tick.py mirofish-offline:/app/backend/scripts/simulation_tick.py
+docker restart mirofish-offline
+```
+(Already deployed in this session.)
+
+---
+
+## Session: 2026-04-12 — NER Noise Filters (ENTITY_REMOVE_LIST + single-token Person filter)
+
+### What was built / fixed
+
+Two targeted noise filters added to `backend/scripts/incremental_update.py`.
+
+#### Fix 1 — ENTITY_REMOVE_LIST
+Added `ENTITY_REMOVE_LIST: set` — a case-sensitive set of entity names that are dropped entirely and never written to Neo4j. Covers:
+- Financial metrics: `ARPU`, `CapEx`, `PNT`, `EBITDA`, `EPS`, `GDP`, `CPI`
+- Role acronyms: `ETF`, `IPO`, `CEO`, `CFO`, `COO`, `CTO`
+- Common ticker symbols: `SPY`, `QQQ`, `TLT`, `GLD`
+- FX codes and crypto: `VIX`, `USD`, `EUR`, `GBP`, `JPY`, `BTC`, `ETH`
+
+The filter is applied in `extract_entities_spacy()` after `ENTITY_TYPE_CORRECTIONS` and before per-chunk deduplication.
+
+Also raised the minimum name length from 2 to 3 characters (catches 2-letter acronyms like "AI" surfaced as ORG).
+
+#### Fix 2 — Single-token Person names dropped
+Added a check: if `etype == "Person"` and the name contains no space, drop it. Partial first names with no surname ("Vince", "Matt") are noise. A full name like "Matt Desch" passes. Applied after type resolution.
+
+#### ENTITY_TYPE_CORRECTIONS expanded
+Added 9 new entries:
+- `FactSet`, `Refinitiv`, `Morningstar`, `S&P`, `S&P 500`, `Dow Jones`, `Wall Street` → `"Company"`
+- `Washington`, `White House` → `"Location"`
+- `Treasury` → `"Company"`
+
+### Architecture decisions
+- `ENTITY_REMOVE_LIST` is a `set` (O(1) lookup) rather than a list — called per entity per chunk, performance matters
+- Check is case-sensitive — the list contains the exact strings spaCy produces for these tokens (all caps for most financial acronyms)
+- Person filter runs after type resolution so `ENTITY_TYPE_CORRECTIONS` can reclassify before the check — entities corrected away from Person still pass
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/incremental_update.py` | `ENTITY_REMOVE_LIST` added; min name length 2→3; single-token Person filter in `extract_entities_spacy`; `ENTITY_TYPE_CORRECTIONS` expanded; docstring updated |
+| `CLAUDE.md` | NER / Knowledge Graph Gotchas updated with `ENTITY_REMOVE_LIST` and single-token Person filter |
+
+### Deploy
+```bash
+docker cp backend/scripts/incremental_update.py mirofish-offline:/app/backend/scripts/incremental_update.py
+docker restart mirofish-offline
+```
+(Already deployed in this session.)
+
+---
+
+## Session: 2026-04-12 — Full Dashboard Redesign
+
+### What was built
+
+Complete rewrite of `frontend/public/dashboard.html` — production-grade redesign with three new features while preserving all existing functionality.
+
+### Aesthetic direction: "Deep Space Command Centre"
+
+- **Background**: `#020617` (Tailwind slate-950, deep navy-black) — replaces pure black `#080b0f`
+- **Surfaces**: `#0A1628` / `#0F1D35` — blue-tinted card surfaces for depth and financial terminal feel
+- **Borders**: `#1E3052` — blue-tinted instead of gray, subtly premium
+- **Header**: `backdrop-filter:blur(12px)` semi-transparent sticky header
+- **Signal cards**: subtle directional radial gradient overlay (bullish = faint green, bearish = faint red)
+- **Buttons/badges**: refined with translucent backgrounds and coloured borders instead of flat fills
+- **Section labels**: left 3px border accent instead of plain text label
+- All Chart.js colours updated to match new palette
+
+### Font changes
+- Added italic weight to IBM Plex Sans import for `ev-reason` text
+- Everything else unchanged (IBM Plex Mono + Sans confirmed optimal by UI/UX plugin design system query)
+
+### New features added
+
+#### 1. Sentiment Alert System
+`detectSentimentAlerts(snapshots)` — called every time `fetchTickSentimentHistory()` completes. Compares most recent snapshot against the snapshot from 4 ticks prior (~2h window). If any asset's sentiment delta ≥ ±0.25, a dismissable alert chip appears in the `#alert-zone` banner below the header. Alert chips are session-deduped via `_alertedKeys` Set. Chips animate in (`slideDown 200ms`), animate out on dismiss.
+
+#### 2. Market Summary Bar
+`updateMarketSummary(signals)` — called inside `renderSignals()`. Shows a one-line market disposition bar between the alert zone and signal grid: `BULLISH · 3 bullish · 2 bearish · 2 neutral`. Colour-coded disposition text. Hidden until first signal data arrives.
+
+#### 3. Signal Strength Bars
+Each signal card now has a `sig-bar-track / sig-bar-fill` mini progress bar showing sentiment score magnitude (0–100% of ±1 range). Color matches signal direction. Visual complement to the border-top accent.
+
+#### 4. Last Tick Age in Header
+`fmtTimeAgo(isoStr)` — computes human-readable elapsed time (e.g. "14m ago"). `fetchLiveState()` reads `last_tick_at` from live state and populates `#last-tick-ts` in the header. Hides if not available. Critical for remote monitoring — immediately shows if simulation is stuck.
+
+#### 5. Skeleton Loading States
+Signal grid initial state replaced with CSS-animated shimmer skeleton placeholders instead of "Loading..." text.
+
+### All existing functionality preserved
+- Every API call: `/api/signals/current`, `/api/signals/history`, `/api/signals/sentiment_history`, `/api/investors/sentiment`, `/api/investors/stats`, `/api/investors/agents`, `/api/live/state`
+- All 9 charts: archChart, riskChart, stratChart, biasChart, historyChart, tickSentChart, reactionDistChart, fgSparkline, feedChart
+- Capital/equal-weighted toggle; 48h/30d toggle; zoom/pan on tick + reaction charts
+- Archetype filter tabs; asset tabs on history chart
+- 30s `fetchAll()` interval; 15min `fetchLiveState()` interval
+- Prices stale badge; live timestamp in header
+
+### Architecture decisions
+- `updateMarketSummary` is called from within `renderSignals` so it fires regardless of data source (live state or API)
+- `detectSentimentAlerts` uses session-level `_alertedKeys` Set — alerts only appear once per session per asset-direction-level combination, preventing re-firing on every 30s refresh
+- Alert zone keeps a static "Signal Alerts" label span and appends `.alert-chip` nodes dynamically
+- `dismissAlert` uses CSS transition for smooth exit, then removes from DOM after 160ms
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `frontend/public/dashboard.html` | Full rewrite — new palette, new features, all existing functionality preserved |
+
+### Deploy
+```bash
+docker cp frontend/public/dashboard.html mirofish-offline:/app/frontend/public/dashboard.html
+```
+(No docker restart needed — static file, served directly.)
+(Already deployed in this session.)
+
+---
+
+## Session: 2026-04-12 — Fundamental Dashboard Redesign (Layout Overhaul)
+
+### What was built
+Complete structural redesign of `frontend/public/dashboard.html`. User rejected the previous session's colour-change redesign ("you just changed the colour — it still looks the exact same"). The new design is a completely different layout — sidebar+main split instead of uniform card grid, horizontal signal strip instead of 7 identical cards, sticky header with market-state dots.
+
+Also included in this session: confirmed all backend data paths work, fixed `e.count` vs `e.mention_count` field name bug in `renderTopEntities`, and verified live state field mapping (`direction`→`signal`, `confidence`→`sentiment_score`).
+
+### Layout structure (new)
+
+```
+HEADER (46px sticky)
+  logo | 7 .mkt-dot coloured circles | status | tick age | live time | refresh btn
+
+ALERT STRIP (#alert-zone)
+  hidden; detectAlerts() appends .alert-chip on sentiment shift ≥±0.25 in 2h window
+
+SIGNAL STRIP (#sig-strip)
+  7 horizontal .stile tiles (horizontal-scroll on mobile)
+  each tile: asset label | signal badge | large $price | 24h Δ | score text | 2px bottom bar
+
+BODY (flex row desktop / column mobile)
+  SIDEBAR (260px sticky top:46px)
+    .stat-pair grid — pool stats big numbers (agents, events, risk, capital, sensitivity, loss)
+    Fear/Greed gauge canvas + sparkline
+    Active Entities ul.ent-list (top 10, count badge)
+    Article Sources feedChart (horizontal bar)
+
+  MAIN (flex: 1, scrollable)
+    Tick sentiment chart (#tickSentChart canvas) — 48h/30d toggle, capital/equal toggle, zoom/pan
+    Reaction distribution (#reactionDistChart canvas) — stacked area, zoom/pan
+    Sentiment vs Price history (asset tabs + #historyChart canvas)
+    2×2 distribution grid (#dist-grid): archChart, riskChart, stratChart, biasChart
+    Memory event feed (#ev-list — last 20 events)
+
+AGENT TABLE (#agents-sec — full width below split)
+  Archetype filter tabs | 200-agent table
+```
+
+### Data path fixes confirmed
+- **`e.count` not `e.mention_count`** — `renderTopEntities` was using `e.mention_count` but the API returns `count` (from `coalesce(e.mention_count, 1) AS count` in signals.py). Fixed.
+- **live state signal fields** — `live_state.json` uses `direction` (not `signal`) and `confidence` (not `sentiment_score`). `fetchLiveState` remaps: `signal: sig.direction, sentiment_score: sig.confidence`. Fixed.
+- **feed_breakdown rendering** — confirmed sidebar shows total article count (`feeds.reduce((s,f)=>s+f.count,0)`) with correct field names `f.source` and `f.count`.
+- **`reaction_distribution` in live state** — is a `{buy, sell, hold, hedge, panic}` object with percentage numbers (0–100 scale). The chart re-fetches full history via `fetchTickSentimentHistory()` when live state arrives; the live state field is not directly rendered to the chart.
+
+### CSS variable palette
+```css
+--bg:#060c18; --panel:#0a1220; --panel2:#0e1828; --raised:#121f32;
+--line:#1a2d47; --line2:#243c5c; --green:#00e676; --red:#ff5252;
+--amber:#ffd740; --blue:#448aff; --purple:#e040fb; --cyan:#18ffff;
+--mono:'IBM Plex Mono',monospace; --ui:'Inter',sans-serif;
+```
+Separate from previous session's `#020617 / #0A1628` palette. True dark navy with cyan/green/purple accent system — closer to terminal aesthetic than blue-tinted glassmorphism.
+
+### New JS functions
+- `updateMktDots(signals)` — updates 7 `.mkt-dot` header circles: bull=green, bear=red, neut=amber based on signal direction
+- `detectAlerts(snapshots)` — replaces `detectSentimentAlerts`; same 2h window logic but with new DOM IDs
+- `checkAlertStrip()` — hides strip when all chips dismissed (called from `dismissAlert`)
+
+### All 9 charts preserved
+archChart, riskChart, stratChart, biasChart, historyChart, tickSentChart, reactionDistChart, fgSparkline, feedChart
+
+### All JS state preserved
+`_historyAsset`, `_archFilter`, `_allAgents`, `_sentimentMode`, `_tickSnapshots`, `_tickWindow`
+
+### Mobile behaviour
+- Sidebar becomes 2-col grid at ≤900px, stacks to column at ≤600px
+- Signal strip horizontal-scrolls on mobile (`overflow-x:auto; -webkit-overflow-scrolling:touch`)
+- Agent table has `overflow-x:auto` wrapper for horizontal scroll on small screens
+
+### Architecture decisions
+- **No UI/UX skill used** — user explicitly prohibited it for this redesign
+- **Sidebar is `position:sticky; top:46px`** — stays in view while main content scrolls; on mobile becomes static
+- **Signal strip uses `display:flex; gap:8px; overflow-x:auto`** — allows adding/removing assets without HTML change
+- **`.mkt-dot` circles in header** — purely visual, updated by `updateMktDots(signals)` after every `renderSignals()` call
+- **`checkAlertStrip()` called from `dismissAlert`** — auto-hides the alert zone row when the last chip is removed
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `frontend/public/dashboard.html` | Fundamental layout redesign — sidebar+main split, signal strip, header dots, all functionality preserved |
+
+### Deploy
+```bash
+docker cp frontend/public/dashboard.html mirofish-offline:/app/frontend/public/dashboard.html
+```
+(No docker restart needed. Already deployed in this session.)
