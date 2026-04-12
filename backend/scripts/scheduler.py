@@ -424,7 +424,7 @@ def main():
     scheduler.add_job(
         daily_job,
         trigger='cron',
-        hour=3,
+        hour=20,
         minute=0,
         kwargs={'graph_id': graph_id, 'status_path': STATUS_PATH, 'status_state': status_state},
         id='daily',
