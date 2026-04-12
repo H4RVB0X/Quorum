@@ -1282,3 +1282,68 @@ archChart, riskChart, stratChart, biasChart, historyChart, tickSentChart, reacti
 docker cp frontend/public/dashboard.html mirofish-offline:/app/frontend/public/dashboard.html
 ```
 (No docker restart needed. Already deployed in this session.)
+
+---
+
+## Session: 2026-04-12 — 15-min Sentiment vs Price History + Volume Mount Fix
+
+### What was built
+Two things in this session:
+
+**1. Sentiment vs Price chart — 15-min resolution**
+Added `price_sentiment_history.json` — a rolling 30-day file written by `dashboard_refresh.py` every 15 minutes. Each entry: `{"ts": "<ISO>", "p": {asset: price}, "s": {asset: sentiment_score}}`. Max 2880 entries (30 days × 96 points/day). Added `GET /api/live/history` endpoint in `live.py` that serves the file. Updated `fetchSignalHistory()` in `dashboard.html` to call the new endpoint instead of `/api/signals/history`, format timestamps as "DD Mon HH:MM", and compute price Δ% from the first point in the window. Chart subtitle shows point count, resolution, and time span dynamically. `fetchLiveState()` now also calls `fetchSignalHistory()` so the chart refreshes on each 15-min live state update.
+
+**2. Volume mount fix — `backend/live/` shared state directory**
+Root cause discovered: `docker-compose.yml` only mounted `./backend/uploads`. `dashboard_refresh.py` writes `live_state.json` and `price_sentiment_history.json` to the HOST filesystem. Flask runs inside the container and cannot see host files unless they are bind-mounted. Both `/api/live/state` and `/api/live/history` had been returning 503/404 silently. The full `backend/` cannot be mounted because it would shadow the container's uv venv at `/app/backend/.venv/`.
+
+Fix: created `backend/live/` as a dedicated shared state directory. Added `- ./backend/live:/app/backend/live` to `docker-compose.yml`. Updated `dashboard_refresh.py` and `live.py` to use the new path.
+
+### Architecture decisions
+- **`backend/live/` is the only cross-boundary shared directory** — all other host-written files (`briefings/`, `prices/`, `logs/`) are only read by host Python scripts, not by Flask. `live/` is the sole exception. Keep it that way.
+- **Atomic rename works inside a bind-mounted directory** — writing `live_state.tmp` then renaming to `live_state.json` within the same bind-mounted directory works correctly because both files share the same filesystem.
+- **History file uses compact JSON** (`separators=(",",":")`) — the file can grow to ~1–2 MB at 2880 entries with 7 assets each. Compact serialisation keeps it small.
+- **`force-recreate` wipes all `docker cp`'d files** — discovered when applying the volume mount change. `docker-compose up --force-recreate` rebuilds the container from the original image. All files ever added via `docker cp` are lost. After any recreate, ALL modified files must be recopied immediately.
+
+### Files that must be recopied after any `docker-compose up --force-recreate`
+```
+backend/app/__init__.py
+backend/app/api/live.py
+backend/app/api/signals.py
+backend/app/api/investors.py
+backend/app/api/control.py
+backend/scripts/simulation_tick.py
+backend/scripts/incremental_update.py
+backend/scripts/news_fetcher.py
+backend/scripts/dashboard_refresh.py
+backend/scripts/scheduler.py
+frontend/public/dashboard.html
+```
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `docker-compose.yml` | Added `- ./backend/live:/app/backend/live` volume mount |
+| `backend/scripts/dashboard_refresh.py` | Writes `live_state.json` and `price_sentiment_history.json` to `backend/live/` instead of `backend/`; appends 15-min history snapshot after each write |
+| `backend/app/api/live.py` | Added `GET /api/live/history` endpoint; all paths updated to read from `backend/live/` |
+| `frontend/public/dashboard.html` | `fetchSignalHistory` calls `/api/live/history`; timestamps formatted with time; price Δ% from window baseline; chart subtitle shows resolution + point count; `fetchLiveState` now also triggers `fetchSignalHistory` |
+
+### Deploy
+```bash
+# After docker-compose volume mount change (recreate required):
+docker-compose up -d --force-recreate mirofish
+
+# Then immediately recopy all modified files (recreate wipes docker cp'd files):
+docker cp backend/app/__init__.py mirofish-offline:/app/backend/app/__init__.py
+docker cp backend/app/api/live.py mirofish-offline:/app/backend/app/api/live.py
+docker cp backend/app/api/signals.py mirofish-offline:/app/backend/app/api/signals.py
+docker cp backend/app/api/investors.py mirofish-offline:/app/backend/app/api/investors.py
+docker cp backend/app/api/control.py mirofish-offline:/app/backend/app/api/control.py
+docker cp backend/scripts/simulation_tick.py mirofish-offline:/app/backend/scripts/simulation_tick.py
+docker cp backend/scripts/incremental_update.py mirofish-offline:/app/backend/scripts/incremental_update.py
+docker cp backend/scripts/news_fetcher.py mirofish-offline:/app/backend/scripts/news_fetcher.py
+docker cp backend/scripts/dashboard_refresh.py mirofish-offline:/app/backend/scripts/dashboard_refresh.py
+docker cp backend/scripts/scheduler.py mirofish-offline:/app/backend/scripts/scheduler.py
+docker cp frontend/public/dashboard.html mirofish-offline:/app/frontend/public/dashboard.html
+docker restart mirofish-offline
+```
+(Already done in this session. Both endpoints confirmed working.)

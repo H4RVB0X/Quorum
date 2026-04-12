@@ -57,13 +57,14 @@ The resulting sentiment scores — weighted by agent capital and conviction — 
 │         Flask API               │   │      dashboard_refresh.py        │
 │  /api/investors/sentiment       │   │  Separate process — 15-min write │
 │  /api/signals/current           │   │  Queries Neo4j + yfinance        │
-│  /api/signals/history           │   │  Writes backend/live_state.json  │
-│  /api/signals/backtest          │   └──────────────┬───────────────────┘
-│  /api/signals/sentiment_history │                  │
-│  /api/investors/stats           │   ┌──────────────▼───────────────────┐
-│  /api/investors/agents          │   │  GET /api/live/state             │
-│  /api/live/state (file read)    │   │  Pure file read — no Neo4j       │
-│  /dashboard                     │   │  503 if file missing             │
+│  /api/signals/history           │   │  Writes backend/live/            │
+│  /api/signals/backtest          │   │    live_state.json               │
+│  /api/signals/sentiment_history │   │    price_sentiment_history.json  │
+│  /api/investors/stats           │   └──────────────┬───────────────────┘
+│  /api/investors/agents          │                  │ bind mount
+│  /api/live/state  (file read)   │   ┌──────────────▼───────────────────┐
+│  /api/live/history (file read)  │   │  backend/live/  ← volume mount   │
+│  /dashboard                     │   │  ./backend/live:/app/backend/live│
 └─────────────────────────────────┘   └──────────────────────────────────┘
 ```
 
@@ -244,7 +245,7 @@ Served at `/dashboard` by Flask. Single self-contained HTML file — all CSS and
 - **Alert strip** — auto-detects sentiment shift ≥±0.25 in a 2h window; shows dismissable chips. Session-deduped.
 - **Tick-level sentiment chart** — per-asset sentiment from `SentimentSnapshot` nodes; capital-weighted / equal-weighted toggle; 48h / 30d window; scroll/pinch zoom + pan
 - **Reaction distribution** — stacked area chart of buy/sell/hold/hedge/panic % over time; zoom/pan
-- **Sentiment vs Price History** — 30-day dual-axis (sentiment + price Δ%) per selected asset
+- **Sentiment vs Price History** — dual-axis chart (sentiment + price Δ% from window start) at 15-min resolution, powered by `price_sentiment_history.json`. Fills in as `dashboard_refresh.py` accumulates data. Refreshes on every 15-min live state update.
 - **Distributions** — archetype, risk histogram, strategy, asset bias bar charts
 - **Fear/greed gauge** — pool trait distribution dial
 - **Memory event feed** — 20 most recent agent reactions with archetype, confidence, reasoning

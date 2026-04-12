@@ -62,9 +62,13 @@ except ImportError:
 _PRICES_DIR   = _BACKEND_DIR / "prices"
 _BRIEFINGS_DIR = _BACKEND_DIR / "briefings"
 _LOGS_PATH    = _BACKEND_DIR / "logs" / "scheduler_runs.json"
-_LIVE_STATE_PATH    = _BACKEND_DIR / "live_state.json"
-_HISTORY_PATH       = _BACKEND_DIR / "price_sentiment_history.json"
-_HISTORY_MAX_POINTS = 2880   # 30 days × 48 points/day at 15-min cadence
+_LIVE_DIR           = _BACKEND_DIR / "live"          # bind-mounted into container
+_LIVE_STATE_PATH    = _LIVE_DIR / "live_state.json"
+_HISTORY_PATH       = _LIVE_DIR / "price_sentiment_history.json"
+_HISTORY_MAX_POINTS = 2880   # 30 days × 96 points/day at 15-min cadence
+
+# Ensure the live/ directory exists (first run before docker-compose creates the mount point)
+_LIVE_DIR.mkdir(parents=True, exist_ok=True)
 
 _ASSET_CLASSES = ["equities", "crypto", "bonds", "commodities", "fx", "real_estate", "mixed"]
 

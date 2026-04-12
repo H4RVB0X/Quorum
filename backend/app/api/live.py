@@ -21,14 +21,20 @@ from flask import Blueprint, jsonify, request
 
 live_bp = Blueprint("live", __name__)
 
+# backend/live/ is bind-mounted from the host (docker-compose.yml).
+# dashboard_refresh.py (host process) writes here; Flask reads here.
+# Candidate paths handle both container layout (/app/backend/live/) and
+# direct host execution (backend/live/ relative to this file's location).
 _BACKEND_ROOT = Path(__file__).parent.parent.parent.parent / "backend"
 _BACKEND_ALT  = Path(__file__).parent.parent.parent
 
-# Two candidate paths: handles both container layout and alternate working dirs
-_LIVE_STATE_PATH     = _BACKEND_ROOT / "live_state.json"
-_LIVE_STATE_PATH_ALT = _BACKEND_ALT  / "live_state.json"
-_HISTORY_PATH        = _BACKEND_ROOT / "price_sentiment_history.json"
-_HISTORY_PATH_ALT    = _BACKEND_ALT  / "price_sentiment_history.json"
+_LIVE_DIR          = _BACKEND_ROOT / "live"
+_LIVE_DIR_ALT      = _BACKEND_ALT  / "live"
+
+_LIVE_STATE_PATH     = _LIVE_DIR     / "live_state.json"
+_LIVE_STATE_PATH_ALT = _LIVE_DIR_ALT / "live_state.json"
+_HISTORY_PATH        = _LIVE_DIR     / "price_sentiment_history.json"
+_HISTORY_PATH_ALT    = _LIVE_DIR_ALT / "price_sentiment_history.json"
 
 
 def _live_state_path() -> Path:
