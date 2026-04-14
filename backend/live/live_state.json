@@ -1,8 +1,8 @@
 {
-  "refreshed_at": "2026-04-12T16:23:46.655866+00:00",
+  "refreshed_at": "2026-04-12T16:38:49.050961+00:00",
   "prices": {
     "equities": 679.460022,
-    "crypto": 70892.726562,
+    "crypto": 70954.804688,
     "bonds": 86.489998,
     "commodities": 437.130005,
     "fx": 98.650002,
@@ -11,7 +11,7 @@
   },
   "price_changes_24h": {
     "equities": 0.0,
-    "crypto": -3.4739,
+    "crypto": -3.3894,
     "bonds": 0.0,
     "commodities": 0.0,
     "fx": 0.0,
@@ -58,8 +58,8 @@
       "asset": "crypto",
       "direction": "bullish",
       "confidence": 0.5784,
-      "price": 70892.726562,
-      "change_24h": -3.4739
+      "price": 70954.804688,
+      "change_24h": -3.3894
     },
     {
       "asset": "bonds",
