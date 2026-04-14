@@ -170,17 +170,26 @@ These snapshots power the tick-level chart and reaction distribution chart on th
 For each sampled agent:
 
 1. Briefing chunks are embedded once with `nomic-embed-text` and cached in memory for the run
-2. The agent's last 5 `MemoryEvent` nodes (past 7 days) are fetched and injected into the system prompt as reaction history — agents carry continuity across ticks
-3. A relevance query is built from `asset_class_bias` + `primary_strategy` (plus geopolitical keywords for sensitive agents)
-4. Cosine similarity selects the 5 most relevant chunks for this agent
-5. The LLM produces a JSON reaction: `{reaction, confidence, reasoning, assets_mentioned}`
-6. A `MemoryEvent` node is written to Neo4j and linked to the agent
+2. **Stratified sampling** guarantees min 5 agents per archetype before random fill to `SAMPLE_SIZE=500`
+3. **Time-horizon gating** (30-min tick only): `participation_prob = min(1.0, 30 / reaction_speed_minutes)`. Prop traders (5 min) always participate; pension funds (14,400 min) ~0.2% probability.
+4. The agent's last 5 `MemoryEvent` nodes are fetched and injected into the system prompt
+5. **All 16 traits** are injected into the persona block with natural-language descriptions — formative crash experience, loss aversion tier, time horizon label, reaction speed, overconfidence tier, geopolitical sensitivity (only if ≥7), leverage pressure, and portfolio concentration
+6. A relevance query is built from `asset_class_bias` + `primary_strategy`; cosine similarity selects the 5 most relevant chunks
+7. The LLM produces a JSON reaction: `{reaction, confidence, reasoning, assets_mentioned}`
+8. A `MemoryEvent` node is written to Neo4j and linked to the agent
 
 If the tick crashes mid-run, a checkpoint file records processed UUIDs so a restart resumes where it left off.
 
+The scheduler pre-checks Ollama availability (GET `/api/tags`, 1-token probe, 60s wait) before starting any tick. If Ollama is unavailable, the tick is skipped and `model_unavailable` is logged.
+
+**MemoryEvent TTL pruning:** Weekly Sunday 04:00 UTC job deletes MemoryEvents older than 90 days (batched at 10,000 nodes). At 500 agents × 48 ticks/day, ~24,000 nodes are written daily — pruning is critical for Neo4j CE longevity.
+
 ### Price Fetching
 
-Daily closing prices for 7 asset-class proxies via yfinance:
+Daily closing prices for 7 asset-class proxies via yfinance. Reliability improvements:
+- Network pre-check (HEAD `https://finance.yahoo.com`) before any yfinance calls
+- Per-ticker retry: up to 3 attempts with 5-second delays; empty data triggers retry
+- Per-ticker WARNING logging with ticker, asset name, error type, and attempt number
 
 | Asset class | Proxy |
 |---|---|

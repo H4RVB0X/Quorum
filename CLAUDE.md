@@ -58,6 +58,24 @@ Be specific. Future Claude sessions rely entirely on this document for context. 
 - **Feed breakdown sidecar** — `news_fetcher.py` writes `briefings/YYYY-MM-DD_HHMM_sources.json` alongside each briefing. This is read by `investors.py/_latest_sources_sidecar()` for the `feed_breakdown` field in `/api/investors/stats`. If the sidecar is missing (first run before a new briefing), `feed_breakdown` returns `[]` — this is correct, not a bug.
 - **Sidecar counts pre-filter articles** — the Counter uses `general_articles + cb_articles` (all fetched articles, before relevance filtering). This shows every feed that returned content, including feeds whose articles were all filtered out. Do NOT change it to `all_articles` (post-filter) — that would hide most feeds since the relevance filter is aggressive.
 
+## Simulation Tick Gotchas (2026-04-14)
+- **`formative_crash` key is `dotcom_2000`, not `dotcom`** — if agents in Neo4j have `formative_crash: 'dotcom'` (old format from generate_agents.py), they silently get no formative crash prose (treated as 'none'). Check: `MATCH (n:Entity {formative_crash: 'dotcom'}) RETURN count(n)`. Fix with a Cypher SET or `generate_agents.py --clear`.
+- **Time-horizon gating only applies to 30-min ticks** — `full=True` bypasses gating entirely. Do not add gating to the daily tick — the point is to simulate agents catching up on a full day of news.
+- **Stratified sampling uses 8 Neo4j queries per tick** (7 archetype + 1 fill) vs 1 for the old random sample. Fast on indexed fields but worth noting if tick startup time increases.
+- **`compute_price_staleness_hours()` is in price_fetcher.py** — imported lazily in signals.py via sys.path insertion. If the container's scripts path changes, update `signals.py` `_price_staleness_hours()`.
+
+## Scheduler Gotchas (2026-04-14)
+- **Ollama health check adds ~2s to tick startup** — `_check_ollama()` sends a 1-token generate probe to confirm the model is loaded, not just running. If Ollama is partially loading, it polls every 10s for up to 60s before aborting. Both `hourly_job` and `daily_job` call it.
+- **Ollama check tries container hostname first** (`http://ollama:11434`), then localhost. If scheduler runs on the host (not in Docker), the ollama hostname will fail but localhost will succeed.
+- **Weekly TTL pruning uses LIMIT 10000 per run** — at 24,000 nodes/day, a 90-day backlog is ~2.16M nodes. The first run on a backlogged database will only delete 10,000 nodes; subsequent weekly runs chip away at the rest. This is intentional to avoid long-running transactions.
+- **`model_unavailable` is a valid `status` value in scheduler_runs.json** — in addition to `success` and `error`. Added in 2026-04-14 session. Any monitoring that checks for non-success status should handle this value.
+
+## Signal API Gotchas (2026-04-14)
+- **`/api/signals/history` now returns null price (not skip) for missing price files** — every date in the requested range is included, with `price: null` when no file exists. Chart.js renders a gap via `spanGaps: false`. Previously, dates with no price file were silently omitted from the response.
+- **History endpoint uses UTC-aware `day_start`** — `tzinfo=timezone.utc` explicitly set. SentimentSnapshot timestamps are stored as UTC ISO strings; timezone-naive `>=` comparison was causing misalignment especially around midnight.
+- **`data_quality: "degraded"` in signal entries** — added to every signal when `price_staleness_hours > 36`. Field absent when prices are fresh. The dashboard does not yet render this visually (planned under TIER 3B).
+- **`price_staleness_hours` in `/api/signals/current` response** — new top-level field in `data` object. Rounds to 2 decimal places. Absent if no price files exist.
+
 ## Signal Backtesting Gotchas
 - **Backtester requires at least 2 days of price snapshots** — `backend/prices/` currently has Apr 7, 8, 9, 10, 11. Signal accuracy becomes statistically meaningful at 30+ trading days. Let the pipeline accumulate.
 - **Backtest confidence calibration counts will be low early** — only directional events (buy/hedge/sell/panic) are counted, not hold. With ~500 agents per tick across ~5 days, counts per tier will be small initially.
@@ -120,3 +138,60 @@ Be specific. Future Claude sessions rely entirely on this document for context. 
 - **Re-entrance guard** — `_catchup_running` threading.Event prevents recursive calls. When a job launched from catch-up finishes and tries to trigger another catch-up, the guard returns immediately. This is intentional: the outer catch-up already handles both jobs sequentially.
 - **`next_run_time` removed from half-hourly APScheduler job** — catch-up handles the startup run. If last halfhourly was < 30 min ago at startup, nothing fires immediately; next tick waits for the normal 30-min interval.
 - **Summer time mismatch**: daily catch-up uses UTC hour ≥ 3; the APScheduler daily job uses Europe/London time. In summer (UTC+1), the APScheduler fires at 02:00 UTC but catch-up won't trigger until 03:00 UTC — up to 1 hour gap. Acceptable.
+
+## Portfolio State Gotchas (2026-04-14)
+- **Agent position fields are written lazily** — most agents will have null position_{asset} fields until they react. Always use `coalesce(a.position_equities, 'flat')` in Cypher when reading. Never assume the field exists.
+- **Position updates use MATCH not MERGE** — `update_agent_positions()` uses `MATCH (a:Entity {uuid, graph_id}) SET ...`. This never creates new agent nodes. If the agent UUID doesn't match (wrong graph_id, etc.), the SET is silently skipped.
+- **panic reaction flattens ALL positions** — regardless of `assets_mentioned`, panic triggers a full liquidation SET across all 7 assets. This is intentional — panic = exit everything.
+- **`assets_mentioned` normalised to asset class keys** — the LLM returns values from `["equities","crypto","bonds","commodities","fx","mixed","real_estate"]`. The position update function filters against `_POSITION_ASSETS` — any unrecognised ticker (e.g. "SPY") is silently ignored. Make sure the JSON schema in `build_prompt()` lists the exact asset class names, not tickers.
+- **Entry price only set on new long** — `update_agent_positions()` only sets `entry_price_{asset}` when `existing_pos == 'flat'`. If an agent is already long and buys again ("adding to position"), the original entry price is preserved. This models averaging-up behaviour accurately — do not change.
+- **Position fetch adds one Neo4j query per active agent per tick** — at 30-min tick with ~100 active agents (after gating), this is ~100 additional MATCH queries per tick. Fast on indexed uuid, but monitor if tick startup latency increases significantly.
+
+## Conviction Scoring Gotchas (2026-04-14)
+- **MemoryEvent `direction`/`conviction`/`position_size` may be null on older nodes** — pre-TIER-2B events never had these fields written. Use `coalesce(m.direction, null) IS NOT NULL` to detect new events in Cypher. `compute_sentiment_scores()` in `investors.py` handles this with a legacy fallback automatically.
+- **Legacy fallback formula**: `score = reaction_score`, `weight = capital × (confidence/10) × 0.3 × leverage × decay`. The `0.3` is a neutral `position_size` default that keeps old events from dominating the 24h window relative to new conviction-weighted events.
+- **Sentiment scoring asymmetry preserved**: 24h window uses conviction model + leverage + decay (`apply_leverage=True, apply_decay=True`). 7d window uses standard capital×confidence (`apply_leverage=False, apply_decay=False`). Do not apply decay to 7d — at 7d age, exp(-0.05×168) ≈ 0.0002 which would effectively zero out all but the last few hours.
+- **`direction` in `compute_sentiment_scores()` carries the sign** — weight is always `|capital × conviction × position_size × leverage × decay|` (positive). The score passed to `weighted_sum += score * weight` is the direction float (-1, 0, +1). Do not negate weight or you'll double-count the sign.
+- **`low_participation: true` in signals response** — added to any asset in `/api/signals/current` where event_count < 200. The signal is forced to "neutral". This is not an error — it's a data quality gate. Dashboard consumers should surface this visually (pending TIER 3B).
+- **Time-decay λ=0.05 rationale**: half-life = ln(2)/0.05 ≈ 13.9 hours. Within a 24h window, events from 24h ago get weight ≈ 0.30 relative to current events. Events from 14h ago get weight ≈ 0.50. This gives recency bias without eliminating older events entirely.
+
+## Drawdown Gotchas (2026-04-14)
+- **Drawdown is a sentiment drawdown, not a price drawdown** — `drawdowns` in `live_state.json` tracks the drop from peak `SentimentSnapshot` score, not from peak price. A drawdown of −60% means sentiment is 60% below its 48-snapshot peak, not that price fell 60%.
+- **Requires ≥5 snapshots per asset to appear** — assets with fewer than 5 non-null snapshots in the last 48 are omitted from the `drawdowns` dict. Not an error.
+- **Peak is the maximum in the 48-snapshot window** — it's a rolling peak (48 × 30min = 24h), not a historical all-time high. The window resets every time the peak snapshot ages out.
+
+## signals.py TIER 2C Gotchas (2026-04-14 session 3)
+- **`_SENTIMENT_QUERY` in `signals.py` now returns TIER 2B fields** — `m.timestamp`, `m.direction`, `m.conviction`, `m.position_size`, `a.leverage_typical`. This is required so `compute_sentiment_scores(apply_leverage=True, apply_decay=True)` can use the conviction model and time-decay. If you add a new field to `investors.py`'s query, check whether `signals.py`'s `_SENTIMENT_QUERY` also needs it.
+- **`_DECAY_LAMBDA = 0.05` constant in `signals.py`** — module-level, with half-life comment. This is the same λ used in `investors.py` (hardcoded inline). They must stay in sync if the decay rate changes.
+- **`current_signals()` uses `compute_sentiment_scores(apply_leverage=True, apply_decay=True)`** — matches the 24h path in `investors.py`'s `get_sentiment()`. Intentional: same scoring formula, same asymmetry (7d does not use leverage or decay).
+- **`data_quality` is always present in signal entries** — values are `"fresh"` or `"degraded"`. Degraded if: price staleness > 36h OR newest MemoryEvent in the 24h window is > 36h old OR no events at all. Previously `data_quality` was only added when degraded (price-staleness only).
+- **Event-based staleness check** — `current_signals()` scans all row timestamps to find the newest event. If no events exist (empty pool, cold start), `event_degraded=True` → `data_quality="degraded"`. On parse failure, `event_degraded=False` (fail safe, assume fresh).
+- **`verify_tier2.py`** — standalone verification script at `backend/scripts/verify_tier2.py`. Runs 13 checks covering TIER 2B/2C/2D. Does not modify production files. Run with: `python backend/scripts/verify_tier2.py`.
+## TIER 2C-ii / 2C-iii / 2D-i / TIER 3 Gotchas (2026-04-14 session 4)
+
+### Dynamic Signal Thresholds (TIER 2C-ii)
+- **`_signal()` uses `None` sentinel default, NOT `_THRESHOLD_FALLBACK`** — the default `threshold` parameter is `None`, and the fallback is looked up inside the function body. Do NOT change to a module-constant default — Python evaluates default args at definition time, and `_THRESHOLD_FALLBACK` is defined after `_signal()`.
+- **`_compute_dynamic_thresholds()` queries last 48 SentimentSnapshots** — falls back to `_THRESHOLD_FALLBACK=0.4` per asset if <10 snapshots exist. Returns `{asset: threshold}` dict. Called once per `/api/signals/current` request.
+- **`dynamic_threshold` field always present in signal entries** — even when using the fallback. Dashboard consumers can use this to show how wide each asset's threshold band is.
+- **Crypto will have a higher threshold than bonds** — correct behavior. When crypto std is high, the threshold widens to avoid false signals. A threshold of 0.6 for crypto is normal.
+
+### Archetype Split (TIER 2C-iii)
+- **`/api/signals/archetype_split` uses same conviction model as `/api/signals/current`** — `apply_leverage=True, apply_decay=True`. Do not use the 7d formula here.
+- **`insufficient_data` when either group has <20 events** — not an error. Smart money archetypes (hedge_fund + prop_trader) typically have far fewer agents than retail. At pipeline start, expect most assets to show `insufficient_data`.
+- **Divergence = smart_money_score − dumb_money_score** — positive means smart money more bullish than dumb money. `|divergence| > 0.3` → smart_leads. `|divergence| ≤ 0.15` → converging. Gap (0.15–0.3) defaults to converging.
+
+### Panic Contagion (TIER 2D-i)
+- **`CONTAGION_FLAG_PATH = backend/briefings/contagion_flag.txt`** — written by `_write_contagion_flag()` after tick; consumed and deleted at the START of the next `run_tick()` call. Transient — never accumulates.
+- **Only injects into agents with `herd_behaviour >= 7`** — the flag text is stored in `contagion_context` inside `run_tick()`; per-agent check `herd_val >= 7.0` determines whether to pass it to `build_prompt()`.
+- **`tick_reactions` now includes `archetype` field** — required for panic rate computation in `_write_contagion_flag()`. If archetype is missing, falls back to `'unknown'`.
+- **Flag is deleted even if panic threshold NOT exceeded** — `_write_contagion_flag()` always removes a stale flag when no archetype crosses >50% panic. This prevents stale flags from persisting across restarts.
+
+### Market Regime (TIER 3)
+- **`compute_market_regime()` is in `price_fetcher.py`** — called at the end of `fetch_prices()`. Never raises — all failures logged at WARNING and degrade gracefully. Returns the regime dict.
+- **`trend=INSUFFICIENT_DATA` until 20 days of price data** — MA-20 needs 20 prices, MA-50 needs 50. With only ~7 days of history, trend is always INSUFFICIENT_DATA. This is correct.
+- **`regime.json` is written to `backend/live/`** — same bind-mounted directory as `live_state.json`. Flask reads it via `/api/live/regime`. Host scripts write it.
+- **OpenBB is optional** — if `openbb` module is not importable, yield curve and VIX fall back to TLT/SPY correlation and SPY volatility proxy respectively. All OpenBB calls wrapped in try/except.
+- **OpenBB installed in container but NOT on host** — `docker exec mirofish-offline uv pip install openbb --python /app/backend/.venv/bin/python`. On the host, price_fetcher.py uses yfinance fallback. This is correct: the host runs the scheduler/price_fetcher outside Docker; OpenBB VIX/yield can be added to host venv later.
+- **Briefing regime header shows `COMPUTING...` when any dimension is `INSUFFICIENT_DATA`** — by design. Until 20+ days of price data, trend is INSUFFICIENT_DATA → all briefings show COMPUTING. This is the correct fallback per spec.
+- **Price snapshot now embeds `regime` key** — `backend/prices/YYYY-MM-DD.json` now contains a `"regime"` sub-dict alongside `"prices"`. Backwards-compatible; old readers that only look at `"prices"` are unaffected.
+- **`verify_tier3.py`** — 22-check verification at `backend/scripts/verify_tier3.py`. Run with: `python backend/scripts/verify_tier3.py`.

@@ -156,6 +156,56 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
 }
 .st-bar{height:2px;background:var(--raised);border-radius:1px;overflow:hidden}
 .st-bar-fill{height:100%;border-radius:1px;transition:width .4s}
+.st-contra{font-family:var(--mono);font-size:8px;color:var(--amber);margin-top:2px;letter-spacing:.04em}
+.st-warn{font-family:var(--mono);font-size:9px;color:var(--amber)}
+
+/* ═══════════════════════════════════════════
+   REGIME STRIP
+═══════════════════════════════════════════ */
+#regime-strip{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:6px 14px;
+  background:var(--panel2);
+  border-bottom:1px solid var(--line);
+  font-family:var(--mono);
+}
+.regime-lbl{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.15em;color:var(--dim);flex-shrink:0}
+.regime-chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center;flex:1}
+.regime-chip{
+  font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;
+  padding:2px 7px;border-radius:3px;white-space:nowrap;
+}
+.regime-green {background:rgba(0,230,118,.12);color:#00e676;border:1px solid rgba(0,230,118,.25)}
+.regime-amber {background:rgba(255,215,64,.10);color:#ffd740;border:1px solid rgba(255,215,64,.25)}
+.regime-orange{background:rgba(255,112,0,.12); color:#ff7000;border:1px solid rgba(255,112,0,.30)}
+.regime-red   {background:rgba(255,82,82,.12); color:#ff5252;border:1px solid rgba(255,82,82,.25)}
+.regime-grey  {background:rgba(84,101,128,.12);color:var(--dim);border:1px solid var(--line)}
+.regime-meta{font-size:9px;color:var(--dim);margin-left:auto;flex-shrink:0}
+
+/* Drawdown sidebar panel */
+.dd-item{display:flex;align-items:center;gap:6px;padding:3px 0}
+.dd-name{font-family:var(--mono);font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.1em;width:80px;flex-shrink:0}
+.dd-pct{font-family:var(--mono);font-size:10px;font-weight:600;color:var(--red);flex-shrink:0;min-width:34px;text-align:right}
+.dd-bar{flex:1;height:3px;background:var(--raised);border-radius:2px;overflow:hidden}
+.dd-fill{height:100%;background:var(--red);border-radius:2px}
+
+/* Archetype split panel */
+.asplit-row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--line)}
+.asplit-row:last-child{border-bottom:none}
+.asplit-asset{font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);width:76px;flex-shrink:0}
+.asplit-bars{flex:1;display:flex;flex-direction:column;gap:2px}
+.asplit-bar-row{display:flex;align-items:center;gap:4px}
+.asplit-bar-lbl{font-family:var(--mono);font-size:8px;color:var(--dim);width:28px;flex-shrink:0}
+.asplit-bar-track{flex:1;height:4px;background:var(--raised);border-radius:2px;overflow:hidden;position:relative}
+.asplit-bar-fill{height:100%;border-radius:2px;position:absolute;transition:width .4s}
+.asplit-sig{font-family:var(--mono);font-size:8px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;flex-shrink:0;min-width:80px;text-align:right}
+.asplit-sig.slb{color:var(--green)}
+.asplit-sig.slr{color:var(--red)}
+.asplit-sig.cvg{color:var(--amber)}
+.asplit-sig.ins{color:var(--dim)}
+.asplit-divbadge{font-family:var(--mono);font-size:8px;padding:1px 4px;border-radius:2px;flex-shrink:0}
+.asplit-divbadge.hi{background:rgba(255,82,82,.15);color:var(--red)}
+.asplit-divbadge.med{background:rgba(255,215,64,.12);color:var(--amber)}
 
 /* ═══════════════════════════════════════════
    PAGE BODY — sidebar + main
@@ -421,6 +471,20 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
   <div class="stile loading" style="min-height:88px;flex:1"></div>
 </div>
 
+<!-- ═══ REGIME STRIP ═══ -->
+<div id="regime-strip">
+  <span class="regime-lbl">Market Regime</span>
+  <div class="regime-chips">
+    <span class="regime-chip regime-grey" id="regime-vol">COMPUTING</span>
+    <span class="regime-chip regime-grey" id="regime-trend">COMPUTING</span>
+    <span class="regime-chip regime-grey" id="regime-yc">COMPUTING</span>
+    <span class="regime-chip regime-grey" id="regime-fear">COMPUTING</span>
+    <span id="regime-vix" style="font-family:var(--mono);font-size:9px;color:var(--dim);display:none"></span>
+    <span id="regime-spread" style="font-family:var(--mono);font-size:9px;color:var(--dim);display:none"></span>
+  </div>
+  <span class="regime-meta" id="regime-age" style="display:none"></span>
+</div>
+
 <!-- ═══ BODY SPLIT ═══ -->
 <div id="body">
 
@@ -480,6 +544,11 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
       <div class="sparkline-wrap">
         <canvas id="fgSparkline" role="img" aria-label="Fear greed sparkline"></canvas>
       </div>
+    </div>
+
+    <div class="side-sec" id="drawdown-sec" style="display:none">
+      <div class="side-title">Sentiment Drawdowns</div>
+      <div id="drawdown-list"></div>
     </div>
 
     <div class="side-sec">
@@ -550,6 +619,15 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
       <div class="chart-h180"><canvas id="historyChart" role="img" aria-label="Sentiment vs price"></canvas></div>
     </div>
 
+    <!-- Smart Money vs Dumb Money -->
+    <div class="sec" id="archetype-split-sec">
+      <div class="sec-title">
+        <span class="sec-h">Smart Money vs Dumb Money</span>
+        <span class="sec-sub" id="split-meta">hedge_fund + prop_trader vs retail_amateur · 24h</span>
+      </div>
+      <div id="archetype-split-list"><div class="empty" style="padding:12px 0;font-size:11px;color:var(--dim)">Loading...</div></div>
+    </div>
+
     <!-- Distributions 2×2 -->
     <div class="sec">
       <div class="sec-title"><span class="sec-h">Pool Distributions</span></div>
@@ -615,6 +693,7 @@ let _sentimentMode = 'capital';
 let _tickSnapshots = [];
 let _tickWindow    = '48h';
 let _alertedKeys   = new Set();
+let _regimeData    = null;
 
 const ARCH_COLORS = {
   retail_amateur:'#00e676', retail_experienced:'#448aff', prop_trader:'#ffd740',
@@ -690,8 +769,8 @@ function initCharts(){
   historyChart=new Chart(document.getElementById('historyChart'),{
     type:'line',
     data:{labels:[],datasets:[
-      {label:'Sentiment',data:[],borderColor:'#00e676',backgroundColor:'rgba(0,230,118,.05)',pointRadius:3,tension:.3,yAxisID:'y'},
-      {label:'Price Δ%',data:[],borderColor:'#448aff',backgroundColor:'rgba(68,138,255,.05)',pointRadius:3,tension:.3,yAxisID:'y1',borderDash:[4,3]}
+      {label:'Sentiment',data:[],borderColor:'#00e676',backgroundColor:'rgba(0,230,118,.05)',pointRadius:3,tension:.3,yAxisID:'y',spanGaps:false},
+      {label:'Price Δ%',data:[],borderColor:'#448aff',backgroundColor:'rgba(68,138,255,.05)',pointRadius:3,tension:.3,yAxisID:'y1',borderDash:[4,3],spanGaps:false}
     ]},
     options:{
       responsive:true,maintainAspectRatio:false,
@@ -786,6 +865,9 @@ function renderSignals(sigs){
   updateMktDots(sigs);
   const el=document.getElementById('sig-strip');
   if(!sigs?.length){el.innerHTML='<div class="stile" style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--dim);font-family:var(--mono);font-size:11px">no signals</div>';return;}
+  const regimeFear=_regimeData?.fear||'';
+  const regimeTrend=_regimeData?.trend||'';
+  const warnFear=regimeFear==='EXTREME_FEAR'||regimeFear==='ELEVATED_FEAR';
   el.innerHTML=sigs.map(s=>{
     const sig=s.signal||'neutral';
     const cls=sig==='bullish'?'bull':sig==='bearish'?'bear':'neut';
@@ -796,13 +878,20 @@ function renderSignals(sigs){
     const scoreStr=score!=null?(score>=0?'+':'')+score.toFixed(2):'—';
     const barPct=score!=null?Math.min(100,Math.abs(score)*100).toFixed(0):0;
     const barCol=cls==='bull'?'var(--green)':cls==='bear'?'var(--red)':'var(--dim)';
+    // Regime contra — signal diverges from overall market trend
+    let contraHtml='';
+    if((regimeTrend==='BEAR_TRENDING'&&sig==='bullish')||(regimeTrend==='BULL_TRENDING'&&sig==='bearish')){
+      contraHtml='<div class="st-contra">⚡ REGIME CONTRA</div>';
+    }
+    const warnHtml=warnFear?'<span class="st-warn">⚠ </span>':'';
     return `<div class="stile ${cls}">
-      <div class="st-label">${s.asset.replace(/_/g,' ')}</div>
+      <div class="st-label">${warnHtml}${s.asset.replace(/_/g,' ')}</div>
       <div class="st-signal ${cls}">${sig}</div>
       <div class="st-price">${s.price!=null?'$'+s.price.toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</div>
       <div class="st-chg ${chgCls}">${chgStr}</div>
       <div class="st-score">score ${scoreStr} · ${s.event_count??0} events</div>
       <div class="st-bar"><div class="st-bar-fill" style="width:${barPct}%;background:${barCol}"></div></div>
+      ${contraHtml}
     </div>`;
   }).join('');
 }
@@ -1073,6 +1162,13 @@ async function fetchSignalHistory(asset){
     const rows=json.data||[];
     if(!rows.length)return;
 
+    // Debug: warn if fewer than expected data points (helps remote debugging)
+    // At 15-min cadence, 48h should yield ~192 points; flag if <10% of that
+    const expectedMin=Math.round((Date.now()-new Date(rows[0]?.ts||0))/(15*60*1000)*0.1);
+    if(rows.length<expectedMin){
+      console.error(`fetchSignalHistory: only ${rows.length} data points (expected ≥${expectedMin} for window). Check dashboard_refresh.py.`);
+    }
+
     // Label: "DD Mon HH:MM"
     historyChart.data.labels=rows.map(r=>{
       try{
@@ -1082,15 +1178,23 @@ async function fetchSignalHistory(asset){
       }catch{return r.ts||''}
     });
 
-    // Sentiment for selected asset
-    historyChart.data.datasets[0].data=rows.map(r=>(r.s&&r.s[asset]!=null)?r.s[asset]:null);
+    // Sentiment for selected asset — null propagates as chart gap (spanGaps:false)
+    const sentData=rows.map(r=>(r.s&&r.s[asset]!=null)?r.s[asset]:null);
+    historyChart.data.datasets[0].data=sentData;
 
-    // Price Δ% from the first available price in the window
+    // Price Δ% from the first available price in the window.
+    // If ALL prices are null, leave price dataset as all-null — chart still renders
+    // with the sentiment line (spanGaps:false causes gap not zero for null prices).
     const basePrice=rows.find(r=>r.p&&r.p[asset]!=null)?.p[asset]??null;
-    historyChart.data.datasets[1].data=rows.map(r=>{
+    const priceData=rows.map(r=>{
       if(basePrice==null||!r.p||r.p[asset]==null)return null;
       return parseFloat(((r.p[asset]-basePrice)/basePrice*100).toFixed(4));
     });
+    historyChart.data.datasets[1].data=priceData;
+
+    // Hide price line if all values are null (avoids empty legend entry dominating)
+    const allPriceNull=priceData.every(v=>v===null);
+    historyChart.data.datasets[1].hidden=allPriceNull;
 
     historyChart.update();
 
@@ -1100,7 +1204,9 @@ async function fetchSignalHistory(asset){
       : null;
     const meta=document.getElementById('hist-meta');
     if(meta)meta.textContent=`— ${rows.length} pts · 15-min res${span!=null?' · '+span+'d span':''}`;
-  }catch(e){}
+  }catch(e){
+    console.error('fetchSignalHistory failed:',e);
+  }
 }
 
 // ── Signals ───────────────────────────────────────────────────────────────────
@@ -1153,6 +1259,7 @@ async function fetchLiveState(){
     if(s.recent_events?.length)updateEvents(s.recent_events,s.pool_stats?.total_memory_events);
     if(s.top_entities?.length)renderTopEntities(s.top_entities);
     if(s.feed_breakdown?.length)renderFeedBreakdown(s.feed_breakdown);
+    renderDrawdowns(s.drawdowns||null);
 
     fetchTickSentimentHistory();
     fetchSignalHistory();
@@ -1171,6 +1278,142 @@ async function fetchLiveState(){
   }catch(e){}
 }
 
+// ── Regime strip ──────────────────────────────────────────────────────────────
+const REGIME_CLASSES={
+  LOW_VOLATILITY:'regime-green',  NORMAL_VOLATILITY:'regime-amber',
+  HIGH_VOLATILITY:'regime-orange',EXTREME_VOLATILITY:'regime-red',
+  BULL_TRENDING:'regime-green',   BEAR_TRENDING:'regime-red',
+  SIDEWAYS:'regime-amber',        MIXED:'regime-orange',
+  NORMAL:'regime-green',          FLAT:'regime-amber',
+  RISING_RATES:'regime-orange',   FLIGHT_TO_SAFETY:'regime-orange',
+  INVERTED:'regime-red',          STABLE:'regime-green',
+  COMPLACENT:'regime-green',      NEUTRAL:'regime-amber',
+  ELEVATED_FEAR:'regime-orange',  EXTREME_FEAR:'regime-red',
+  INSUFFICIENT_DATA:'regime-grey',COMPUTING:'regime-grey',
+};
+function regimeCls(val){return REGIME_CLASSES[val]||'regime-grey';}
+
+function renderRegimeStrip(r){
+  if(!r){return;}
+  _regimeData=r;
+  const set=(id,val)=>{
+    const el=document.getElementById(id);
+    if(!el)return;
+    el.textContent=val.replace(/_/g,' ');
+    el.className='regime-chip '+regimeCls(val);
+  };
+  set('regime-vol', r.volatility);
+  set('regime-trend',r.trend);
+  set('regime-yc',  r.yield_curve);
+  set('regime-fear',r.fear);
+  const vixEl=document.getElementById('regime-vix');
+  if(vixEl){
+    if(r.vix!=null){vixEl.textContent='VIX: '+r.vix;vixEl.style.display='';}
+    else vixEl.style.display='none';
+  }
+  const spEl=document.getElementById('regime-spread');
+  if(spEl){
+    if(r.yield_spread_pct!=null){spEl.textContent='Spread: '+r.yield_spread_pct+'%';spEl.style.display='';}
+    else spEl.style.display='none';
+  }
+  const ageEl=document.getElementById('regime-age');
+  if(ageEl&&r.computed_at){
+    ageEl.textContent='updated '+fmtAgo(r.computed_at);
+    ageEl.style.display='';
+  }
+}
+
+async function fetchRegime(){
+  try{
+    const res=await fetch(`${API}/api/live/regime?graph_id=${GRAPH_ID}`);
+    if(res.status===503){
+      // Not yet computed — keep grey placeholders
+      return;
+    }
+    if(!res.ok)return;
+    const j=await res.json();
+    if(j.success&&j.data)renderRegimeStrip(j.data);
+  }catch(e){
+    // log and continue — regime fetch failure must not break fetchAll
+    console.warn('fetchRegime failed:',e);
+  }
+}
+
+// ── Archetype split ───────────────────────────────────────────────────────────
+function renderArchetypeSplit(data){
+  const el=document.getElementById('archetype-split-list');
+  if(!el)return;
+  const assets=data?.assets;
+  if(!assets){el.innerHTML='<div class="empty" style="padding:12px 0;color:var(--dim)">No data</div>';return;}
+  const ASSET_ORDER=['equities','crypto','bonds','commodities','fx','real_estate','mixed'];
+  el.innerHTML=ASSET_ORDER.filter(a=>assets[a]).map(a=>{
+    const d=assets[a];
+    const sm=d.smart_money??0;
+    const dm=d.dumb_money??0;
+    const div=d.divergence??0;
+    const sig=d.signal||'insufficient_data';
+    const sigCls=sig==='smart_leads_bullish'?'slb':sig==='smart_leads_bearish'?'slr':sig==='converging'?'cvg':'ins';
+    const sigLabel=sig.replace(/_/g,' ');
+    // Bars: centre at 50%, positive = right, negative = left
+    const smPct=Math.min(100,Math.abs(sm)*100);
+    const dmPct=Math.min(100,Math.abs(dm)*100);
+    const smBg=sm>=0?'var(--green)':'var(--red)';
+    const dmBg=dm>=0?'var(--green)':'var(--red)';
+    const smLeft=sm>=0?'50%':'calc(50% - '+smPct/2+'%)';
+    const dmLeft=dm>=0?'50%':'calc(50% - '+dmPct/2+'%)';
+    const absDiv=Math.abs(div);
+    const divBadge=absDiv>0.5?`<span class="asplit-divbadge hi">Δ${div.toFixed(2)}</span>`:
+                   absDiv>0.3?`<span class="asplit-divbadge med">Δ${div.toFixed(2)}</span>`:'';
+    return `<div class="asplit-row">
+      <div class="asplit-asset">${a.replace(/_/g,' ')}</div>
+      <div class="asplit-bars">
+        <div class="asplit-bar-row">
+          <span class="asplit-bar-lbl">smart</span>
+          <div class="asplit-bar-track"><div class="asplit-bar-fill" style="left:${smLeft};width:${smPct/2}%;background:${smBg}"></div></div>
+        </div>
+        <div class="asplit-bar-row">
+          <span class="asplit-bar-lbl">dumb</span>
+          <div class="asplit-bar-track"><div class="asplit-bar-fill" style="left:${dmLeft};width:${dmPct/2}%;background:${dmBg}"></div></div>
+        </div>
+      </div>
+      ${divBadge}
+      <span class="asplit-sig ${sigCls}">${sigLabel}</span>
+    </div>`;
+  }).join('');
+}
+
+async function fetchArchetypeSplit(){
+  try{
+    const res=await fetch(`${API}/api/signals/archetype_split?graph_id=${GRAPH_ID}`);
+    if(!res.ok)return;
+    const j=await res.json();
+    if(j.success&&j.data)renderArchetypeSplit(j.data);
+  }catch(e){
+    console.warn('fetchArchetypeSplit failed:',e);
+  }
+}
+
+// ── Drawdown panel ────────────────────────────────────────────────────────────
+function renderDrawdowns(drawdowns){
+  const sec=document.getElementById('drawdown-sec');
+  const list=document.getElementById('drawdown-list');
+  if(!sec||!list)return;
+  if(!drawdowns){sec.style.display='none';return;}
+  // Only show assets where drawdown < -10%
+  const entries=Object.entries(drawdowns).filter(([,v])=>v.drawdown_pct<-10);
+  if(!entries.length){sec.style.display='none';return;}
+  sec.style.display='';
+  list.innerHTML=entries.sort((a,b)=>a[1].drawdown_pct-b[1].drawdown_pct).map(([asset,v])=>{
+    const pct=v.drawdown_pct.toFixed(1);
+    const barW=Math.min(100,Math.abs(v.drawdown_pct)).toFixed(0);
+    return `<div class="dd-item">
+      <span class="dd-name">${asset.replace(/_/g,' ')}</span>
+      <span class="dd-pct">${pct}%</span>
+      <div class="dd-bar"><div class="dd-fill" style="width:${barW}%"></div></div>
+    </div>`;
+  }).join('');
+}
+
 // ── Main fetch (30s) ──────────────────────────────────────────────────────────
 async function fetchAll(){
   const dot=document.getElementById('pulse');
@@ -1183,6 +1426,8 @@ async function fetchAll(){
     fetchSentiment();
     fetchSignals();
     fetchTickSentimentHistory();
+    fetchRegime();
+    fetchArchetypeSplit();
 
     if(!statsRes.ok)throw new Error('API '+statsRes.status);
     const stats=await statsRes.json();

@@ -433,7 +433,45 @@ def refresh(graph_id: str) -> None:
         except Exception as e:
             logger.warning(f"Reaction distribution query failed: {e}")
 
-        # -- 2c. Signals (derived from sentiment + prices, no extra DB call) --
+        # -- 2c. Drawdown tracking per asset class (TIER 2D) --
+        try:
+            with driver.session() as session:
+                snap_rows = session.run(
+                    """
+                    MATCH (s:SentimentSnapshot {graph_id: $gid})
+                    RETURN s.timestamp   AS ts,
+                           s.equities    AS equities,
+                           s.crypto      AS crypto,
+                           s.bonds       AS bonds,
+                           s.commodities AS commodities,
+                           s.fx          AS fx,
+                           s.real_estate AS real_estate,
+                           s.mixed       AS mixed
+                    ORDER BY s.timestamp DESC LIMIT 48
+                    """,
+                    gid=graph_id,
+                ).data()
+
+            if len(snap_rows) >= 5:
+                drawdowns = {}
+                for asset in _ASSET_CLASSES:
+                    values = [r.get(asset) for r in snap_rows if r.get(asset) is not None]
+                    if len(values) < 5:
+                        continue  # insufficient data for this asset
+                    current_val = values[0]  # most recent (DESC order)
+                    peak_val    = max(values)
+                    dd_pct      = (current_val - peak_val) / abs(peak_val) * 100 if peak_val != 0 else 0.0
+                    drawdowns[asset] = {
+                        "peak":         round(peak_val, 4),
+                        "current":      round(current_val, 4),
+                        "drawdown_pct": round(dd_pct, 2),
+                    }
+                if drawdowns:
+                    state["drawdowns"] = drawdowns
+        except Exception as e:
+            logger.warning(f"Drawdown computation failed: {e}")
+
+        # -- 2d. Signals (derived from sentiment + prices, no extra DB call) --
         try:
             signals = []
             for asset in _ASSET_CLASSES:
@@ -449,7 +487,7 @@ def refresh(graph_id: str) -> None:
         except Exception as e:
             logger.warning(f"Signals derivation failed: {e}")
 
-        # -- 2d. Top entities --
+        # -- 2e. Top entities --
         try:
             with driver.session() as session:
                 rows = session.run(
@@ -472,7 +510,7 @@ def refresh(graph_id: str) -> None:
         except Exception as e:
             logger.warning(f"Top entities query failed: {e}")
 
-        # -- 2e. Recent events --
+        # -- 2f. Recent events --
         try:
             with driver.session() as session:
                 rows = session.run(
@@ -503,7 +541,7 @@ def refresh(graph_id: str) -> None:
         except Exception as e:
             logger.warning(f"Recent events query failed: {e}")
 
-        # -- 2f. Pool stats --
+        # -- 2g. Pool stats --
         try:
             with driver.session() as session:
                 pool_size = session.run(

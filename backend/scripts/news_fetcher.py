@@ -222,9 +222,50 @@ def parse_feed(source_name: str, feed_url: str, seen: dict, source_type: str = "
 # Briefing writer
 # ---------------------------------------------------------------------------
 
+def _build_regime_header() -> str:
+    """
+    TIER 3: Build a regime header string from backend/live/regime.json.
+    Returns the header string, or a COMPUTING placeholder if unavailable.
+    """
+    import json as _json
+    live_dir = Path(__file__).parent.parent / "live"
+    regime_path = live_dir / "regime.json"
+    try:
+        if not regime_path.exists():
+            return "[MARKET REGIME: COMPUTING...]\n"
+        regime = _json.loads(regime_path.read_text(encoding="utf-8"))
+        vol  = regime.get("volatility",   "INSUFFICIENT_DATA")
+        tnd  = regime.get("trend",        "INSUFFICIENT_DATA")
+        yc   = regime.get("yield_curve",  "INSUFFICIENT_DATA")
+        fear = regime.get("fear",         "INSUFFICIENT_DATA")
+        v_pct = regime.get("annualised_vol_pct")
+        vix   = regime.get("vix")
+        spread = regime.get("yield_spread_pct")
+
+        # If any dimension is INSUFFICIENT_DATA, use the placeholder
+        if any(v == "INSUFFICIENT_DATA" for v in (vol, tnd, yc, fear)):
+            return "[MARKET REGIME: COMPUTING...]\n"
+
+        vol_str = f"{vol} ({v_pct}% annualised)" if v_pct is not None else vol
+        header = f"[MARKET REGIME: {vol_str} | {tnd} | {yc} | {fear}]"
+        extras = []
+        if vix is not None:
+            extras.append(f"VIX: {vix}")
+        if spread is not None:
+            extras.append(f"Yield spread (10Y-3M): {spread}%")
+        if extras:
+            header += "\n" + "  ".join(extras)
+        return header + "\n"
+    except Exception as e:
+        logger.warning(f"regime header: failed to read regime.json ({e}) — using placeholder")
+        return "[MARKET REGIME: COMPUTING...]\n"
+
+
 def write_briefing(articles: list, output_path: Path) -> None:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
-    lines = [f"MIROFISH BRIEFING — {now_str}\n{'='*60}\n"]
+    # TIER 3: prepend market regime header
+    regime_header = _build_regime_header()
+    lines = [regime_header, f"MIROFISH BRIEFING — {now_str}\n{'='*60}\n"]
     for art in articles:
         source_label = art['source']
         if art.get('source_type') == 'central_bank':

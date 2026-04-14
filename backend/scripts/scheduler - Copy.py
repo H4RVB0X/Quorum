@@ -3,21 +3,15 @@ scheduler.py — APScheduler orchestrator for MiroFish live news pipeline.
 
 Jobs:
   - Half-hourly (every 30 min):  news_fetcher → incremental_update → simulation_tick (500 agents)
-  - Daily  (20:00 UTC):          simulation_tick --full (all agents, no sampling)
-                                  Finishes ~06:00 UTC next day — data fresh before US open.
-  - Weekly (Sunday 04:00 UTC):   MemoryEvent TTL pruning — DETACH DELETE events older than 90 days.
+  - Daily  (03:00 UTC):          simulation_tick --full (all agents, no sampling)
 
 Mutex: _daily_running Event blocks the half-hourly tick while daily job is running.
 Status: writes /backend/scripts/status.json after every job cycle.
 Log: appends to /backend/logs/scheduler_runs.json after every job completes.
 Catch-up: on startup and after every job, re-checks for overdue jobs:
-  - daily: if past 20:00 UTC and not yet run today (UTC date)
+  - daily: if past 03:00 UTC and not yet run today (UTC date)
   - half-hourly: if last completed run > 30 min ago (or no record exists)
   Daily always runs before half-hourly if both are overdue.
-
-Ollama health check: before each tick (both 30-min and daily), verifies that
-  Ollama is reachable and qwen2.5:14b is loaded. If unavailable or loading,
-  waits up to 60 seconds (10-second polls). Skips the tick if still unavailable.
 
 Usage:
   python scheduler.py [--graph-id <uuid>]
@@ -25,7 +19,6 @@ Usage:
 import sys
 import os
 import json
-import time
 import argparse
 import threading
 from datetime import datetime, timezone
@@ -168,9 +161,9 @@ def run_catchup(graph_id: str, status_path: Path, status_state: dict) -> None:
     try:
         now = datetime.now(timezone.utc)
 
-        # Step 1 — daily overdue? (past 20:00 UTC and not yet run today)
+        # Step 1 — daily overdue? (past 03:00 UTC and not yet run today)
         daily_overdue = False
-        if now.hour >= 20:
+        if now.hour >= 3:
             last_daily = _last_run_of_type('daily')
             if last_daily is None:
                 daily_overdue = True
@@ -208,132 +201,6 @@ def run_catchup(graph_id: str, status_path: Path, status_state: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Ollama health check
-# ---------------------------------------------------------------------------
-
-_OLLAMA_TARGET_MODEL = "qwen2.5:14b"
-# Try container hostname first (running inside Docker), fall back to localhost (host runner)
-_OLLAMA_URLS = ["http://ollama:11434", "http://localhost:11434"]
-_OLLAMA_POLL_INTERVAL = 10   # seconds between polls when model is loading
-_OLLAMA_MAX_WAIT = 60        # total seconds to wait for model to become ready
-
-
-def _check_ollama() -> bool:
-    """
-    Pre-flight check before any tick.
-
-    Steps:
-      1. GET /api/tags from Ollama (tries container URL then localhost).
-      2. Verify _OLLAMA_TARGET_MODEL is in the returned model list.
-      3. If model is present but not 'ready', poll every 10s for up to 60s.
-
-    Returns True if model is available and ready.
-    Returns False if Ollama is unreachable or the model is absent after the wait.
-    Logs at WARNING level on every failure.
-    """
-    try:
-        import requests as _requests
-    except ImportError:
-        logger.warning("Ollama health check: 'requests' not installed — skipping check (assuming available)")
-        return True
-
-    tags_url = None
-    response_json = None
-
-    for base_url in _OLLAMA_URLS:
-        try:
-            resp = _requests.get(f"{base_url}/api/tags", timeout=5)
-            if resp.status_code == 200:
-                tags_url = base_url
-                response_json = resp.json()
-                break
-        except Exception:
-            continue
-
-    if response_json is None:
-        logger.warning(
-            f"Ollama unavailable — tried {_OLLAMA_URLS}. Skipping tick."
-        )
-        return False
-
-    # Check whether the target model is listed
-    models = response_json.get("models", [])
-    model_names = [m.get("name", "") for m in models]
-    model_present = any(_OLLAMA_TARGET_MODEL in name for name in model_names)
-
-    if not model_present:
-        logger.warning(
-            f"Ollama reachable at {tags_url} but model '{_OLLAMA_TARGET_MODEL}' not found. "
-            f"Models available: {model_names}. Skipping tick."
-        )
-        return False
-
-    # Model found — check if it needs load time (poll up to _OLLAMA_MAX_WAIT seconds)
-    waited = 0
-    while waited < _OLLAMA_MAX_WAIT:
-        # A simple generate probe to confirm the model is actually responding
-        try:
-            probe = _requests.post(
-                f"{tags_url}/api/generate",
-                json={"model": _OLLAMA_TARGET_MODEL, "prompt": "ping", "stream": False, "options": {"num_predict": 1}},
-                timeout=15,
-            )
-            if probe.status_code == 200:
-                logger.info(f"Ollama health check passed — {_OLLAMA_TARGET_MODEL} ready at {tags_url}")
-                return True
-        except Exception as e:
-            logger.info(f"Ollama model probe not ready yet: {e} — retrying in {_OLLAMA_POLL_INTERVAL}s")
-
-        time.sleep(_OLLAMA_POLL_INTERVAL)
-        waited += _OLLAMA_POLL_INTERVAL
-
-    logger.warning(
-        f"Ollama model '{_OLLAMA_TARGET_MODEL}' did not respond after {_OLLAMA_MAX_WAIT}s. Skipping tick."
-    )
-    return False
-
-
-# ---------------------------------------------------------------------------
-# MemoryEvent TTL pruning
-# ---------------------------------------------------------------------------
-
-_MEMORY_TTL_DAYS = 90
-
-
-def prune_memory_events(graph_id: str) -> None:
-    """
-    Delete MemoryEvent nodes older than _MEMORY_TTL_DAYS days.
-    Run weekly to prevent Neo4j CE degrading under accumulation load.
-    At 500 agents × 48 ticks/day, ~24,000 nodes are written daily; without
-    pruning Neo4j CE will degrade significantly within months.
-    """
-    logger.info(f"MemoryEvent TTL pruning: deleting events older than {_MEMORY_TTL_DAYS} days")
-    _driver = None
-    try:
-        _driver = db_setup()
-        with _driver.session() as session:
-            result = session.run(
-                """
-                MATCH (m:MemoryEvent {graph_id: $gid})
-                WHERE m.timestamp < datetime() - duration({days: $days})
-                WITH m LIMIT 10000
-                DETACH DELETE m
-                RETURN count(m) AS deleted
-                """,
-                gid=graph_id,
-                days=_MEMORY_TTL_DAYS,
-            )
-            record = result.single()
-            deleted = record["deleted"] if record else 0
-            logger.info(f"MemoryEvent TTL pruning complete: {deleted} nodes deleted")
-    except Exception as e:
-        logger.error(f"MemoryEvent TTL pruning failed: {e}")
-    finally:
-        if _driver:
-            _driver.close()
-
-
-# ---------------------------------------------------------------------------
 # Job functions
 # ---------------------------------------------------------------------------
 
@@ -364,19 +231,6 @@ def hourly_job(graph_id: str, status_path: Path, status_state: dict) -> None:
         logger.info("Price fetch complete")
     except Exception as e:
         logger.warning(f"price_fetcher: {e}")
-
-    # Pre-flight: verify Ollama is up and the target model is loaded before any tick
-    if not _check_ollama():
-        logger.warning("Ollama unavailable — skipping hourly tick")
-        finished_at = datetime.now(timezone.utc).isoformat()
-        append_run_log(
-            job_type='halfhourly',
-            started_at=started_at,
-            finished_at=finished_at,
-            status='model_unavailable',
-            error='Ollama health check failed',
-        )
-        return
 
     try:
         # Connect fresh driver for this job cycle
@@ -469,12 +323,6 @@ def daily_job(graph_id: str, status_path: Path, status_state: dict) -> None:
         except Exception as e:
             logger.error(f"Daily job: Neo4j connection failed: {e}")
             error = f"neo4j_connect: {e}"
-            return
-
-        # Pre-flight: verify Ollama is up and the target model is loaded
-        if not _check_ollama():
-            logger.warning("Ollama unavailable — skipping daily tick")
-            error = "model_unavailable"
             return
 
         briefings_dir = Path(__file__).parent.parent / "briefings"
@@ -572,7 +420,7 @@ def main():
         misfire_grace_time=None,
     )
 
-    # Daily job — 20:00 UTC
+    # Daily job — 03:00 local time
     scheduler.add_job(
         daily_job,
         trigger='cron',
@@ -581,23 +429,6 @@ def main():
         kwargs={'graph_id': graph_id, 'status_path': STATUS_PATH, 'status_state': status_state},
         id='daily',
         name='Daily full simulation tick',
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # Weekly MemoryEvent TTL pruning — Sunday 04:00 UTC
-    # At 500 agents × 48 ticks/day = ~24,000 MemoryEvent nodes/day.
-    # Without pruning, Neo4j CE degrades significantly within months.
-    # Deletes events older than 90 days in batches of 10,000.
-    scheduler.add_job(
-        prune_memory_events,
-        trigger='cron',
-        day_of_week='sun',
-        hour=4,
-        minute=0,
-        kwargs={'graph_id': graph_id},
-        id='weekly_ttl_prune',
-        name='Weekly MemoryEvent TTL pruning (90d)',
         max_instances=1,
         coalesce=True,
     )

@@ -1347,3 +1347,343 @@ docker cp frontend/public/dashboard.html mirofish-offline:/app/frontend/public/d
 docker restart mirofish-offline
 ```
 (Already done in this session. Both endpoints confirmed working.)
+
+---
+
+## Session: 2026-04-14 — TIER 1 Completion + Pipeline Hardening
+
+### What was built
+
+Seven improvements across five files:
+
+1. **TIER 1 trait injection finalised** (`simulation_tick.py`) — Updated `build_prompt()` with exact spec trait mappings. Key changes from the previous implementation:
+   - `formative_crash` key for dotcom updated from `'dotcom'` to `'dotcom_2000'`; `'none'` now omits the block entirely (no text added)
+   - `loss_aversion_multiplier` breakpoints: <0.5 / 0.5–1.5 / 1.5–3.5 / >3.5 (was <0.5 / <1.5 / <3.0 / <5.5)
+   - `time_horizon_days` breakpoints: <30 / <365 / ≤1095 / >1095 (was ≤90 / ≤730 / ≤2000)
+   - `geopolitical_sensitivity` only injected if ≥7 (was always injected)
+   - `reaction_speed_minutes` simplified: "within X minutes" or "over days to weeks, not hours" (was complex branching)
+   - `overconfidence_bias` three tiers: <4 / 4–6 / ≥7 with descriptive text
+   - `leverage_typical` added: prose description if not 'none'
+   - `asset_class_bias` added: "Your portfolio is concentrated in {asset} — frame your reaction in terms of your exposure"
+
+2. **Time-horizon gating** (`simulation_tick.py`) — 30-min tick only. `participation_probability = min(1.0, 30.0 / reaction_speed_minutes)`. Agents who don't pass `random.random() < participation_prob` are counted in the sample but skip LLM call and MemoryEvent write. INFO log: "Tick participation: {active}/{sampled} agents active after time-horizon gating". Daily full tick bypasses gating entirely.
+
+3. **Stratified agent sampling** (`simulation_tick.py`) — New `load_agents_stratified()` function. For each of the 7 archetypes, fetches `min(5, pool_size)` random agents first (guaranteed slots). Fills `SAMPLE_SIZE - guaranteed_count` remaining slots from the full pool (excluding already-selected UUIDs). Prevents pension_fund / hedge_fund from disappearing due to random sampling variance. Full tick still uses `load_agents()` (all agents, no sampling).
+
+4. **price_fetcher.py reliability** — Three improvements:
+   - Network pre-check: `requests.get("https://finance.yahoo.com", timeout=5)` before yfinance calls. Raises `RuntimeError` (caught as warning in scheduler) if unreachable — prevents writing partial data.
+   - Per-ticker retry: up to 3 attempts with 5-second delays. Empty data from yfinance triggers retry (not just exceptions).
+   - Per-ticker WARNING logging with ticker symbol, asset name, error type, and attempt number on every failure.
+   - New `compute_price_staleness_hours()` helper: reads `fetched_at` from the most recent price file, returns age in hours. Falls back to file mtime.
+
+5. **signals.py history endpoint fix** — Three changes:
+   - History endpoint no longer skips dates with missing price files — returns `null` for price instead, so all dates appear in the response.
+   - Timezone fix: `day_start` now explicitly `tzinfo=timezone.utc` — previously timezone-naive datetimes could mismatch against UTC-stored SentimentSnapshot timestamps.
+   - Error logging: Neo4j query failures per date are now caught and logged at ERROR (were silent).
+   - Current endpoint adds `data_quality: "degraded"` to every signal when `price_staleness_hours > 36`.
+   - `price_staleness_hours` included in `/api/signals/current` response.
+
+6. **dashboard.html history chart fix** — Three changes:
+   - `spanGaps: false` added to both datasets in `historyChart` config — Chart.js renders a visual gap at null values instead of connecting across them (was showing zero / broken line).
+   - Price line hidden entirely (`dataset.hidden = true`) when all price values are null, so sentiment line renders cleanly without an empty legend entry.
+   - `console.error` log in `fetchSignalHistory` when data point count is abnormally low (<10% of expected for the time window). Easier to debug remotely.
+   - Catch block added to `fetchSignalHistory` with `console.error` for any fetch/parse failures.
+
+7. **scheduler.py hardening** — Two additions:
+   - `_check_ollama()` function: tries `http://ollama:11434/api/tags` then `http://localhost:11434/api/tags`. Verifies `qwen2.5:14b` in model list, then sends a 1-token generate probe to confirm ready state. Polls every 10s for up to 60s if loading. Returns `False` + logs WARNING if unavailable. Both `hourly_job` and `daily_job` return early if check fails, logging `model_unavailable` to `scheduler_runs.json`.
+   - `prune_memory_events()` function + weekly APScheduler job (Sunday 04:00 UTC): `MATCH (m:MemoryEvent {graph_id: $gid}) WHERE m.timestamp < datetime() - duration({days: 90}) WITH m LIMIT 10000 DETACH DELETE m`. Batched at 10,000 to avoid long-running transactions. INFO logs count of deleted nodes.
+
+### Architecture decisions
+- **`load_agents_stratified` uses separate queries per archetype** — 7 queries + 1 fill query = 8 total vs 1 for `load_agents`. Acceptable: these are fast indexed lookups (uuid, graph_id, investor_archetype), not full scans. The stratification guarantee is worth the extra round-trips.
+- **Time-horizon gating counts gated agents in `sampled_count`** — the spec says "agents who are gated out are still counted in the sample." `sampled_count = len(agents)` (post-checkpoint-recovery). Active count is incremented only when the gating check passes.
+- **Ollama health check uses a 1-token generate probe** — checking `/api/tags` only confirms Ollama is running, not that the model is loaded into GPU memory. The probe request forces a load check. `num_predict: 1` keeps latency minimal.
+- **`requests` not `httpx` for Ollama check** — `requests` is already available in the container; no new dependency needed.
+- **`_check_network()` in price_fetcher uses `requests`** — same reasoning. `requests` is a standard container dependency.
+- **history endpoint returns null price, not zero** — zero would shift the sentiment baseline calculation in `updateHistoryChart` (divides by first available price). Null correctly produces a chart gap via `spanGaps: false`.
+
+### Gotchas for next session
+- **`formative_crash` key change: `dotcom` → `dotcom_2000`** — if existing agents have `formative_crash: 'dotcom'` (old format) in Neo4j, those agents will silently omit the formative crash prose (same as 'none'). Check with: `MATCH (n:Entity {formative_crash: 'dotcom'}) RETURN count(n)`. If non-zero, run `generate_agents.py --clear` or a Cypher update to fix the value.
+- **Ollama probe adds ~2s to tick startup time** — negligible for hourly/daily jobs, but worth noting if the probe hangs (e.g. Ollama is partially loaded). The 60s max wait prevents infinite blocking.
+- **Weekly pruning job uses LIMIT 10000 per run** — at 24,000 nodes/day, a 90-day backlog is ~2.16M nodes. First-ever run after a long pipeline run may need multiple weekly executions to fully clear the backlog. Not a bug.
+- **`price_staleness_hours` in `/api/signals/current`** — newly added field. Any consumer of the API (dashboard, monitoring) should handle its absence gracefully (older deployed versions won't have it).
+- **Dashboard chart `hidden` flag on price dataset** — set to `true` when all prices null, `false` when any price exists. Chart.js persists `.hidden` across `update()` calls, so the flag is always explicitly set in `fetchSignalHistory`.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/simulation_tick.py` | Trait mappings updated; time-horizon gating added; stratified sampling (`load_agents_stratified`); `import random` added |
+| `backend/scripts/price_fetcher.py` | Network pre-check; per-ticker retry (3×, 5s); per-ticker WARNING logging; `compute_price_staleness_hours()` helper |
+| `backend/app/api/signals.py` | History endpoint: null prices, UTC timezone fix, error logging; current endpoint: `data_quality: degraded`, `price_staleness_hours`; `_price_staleness_hours()` helper |
+| `frontend/public/dashboard.html` | `spanGaps: false` on historyChart datasets; price line hidden when all-null; `console.error` for low data point counts and fetch failures |
+| `backend/scripts/scheduler.py` | `_check_ollama()` pre-flight check in both jobs; `prune_memory_events()` + weekly APScheduler job (Sunday 04:00 UTC, 90d TTL); `import time` added |
+| `ROADMAP.md` | TIER 1 marked complete; new tiers 2C (Signal Quality), 2D (Risk), 3B (Data Integrity) added; TIER 5 extended with OpenBB, UX items, embedding cache, diversity canary |
+
+### Deploy
+```bash
+docker cp backend/scripts/simulation_tick.py mirofish-offline:/app/backend/scripts/simulation_tick.py
+docker cp backend/scripts/price_fetcher.py mirofish-offline:/app/backend/scripts/price_fetcher.py
+docker cp backend/scripts/scheduler.py mirofish-offline:/app/backend/scripts/scheduler.py
+docker cp backend/app/api/signals.py mirofish-offline:/app/backend/app/api/signals.py
+docker cp frontend/public/dashboard.html mirofish-offline:/app/frontend/public/dashboard.html
+docker restart mirofish-offline
+```
+(Done in this session. Container confirmed healthy post-restart.)
+
+---
+
+## Session: 2026-04-14 (continuation) — TIER 2A/2B/2C/2D
+
+### What was built
+
+**TIER 2A — Portfolio State Tracking**
+- `load_agent_positions(driver, agent_uuid, graph_id)` — single-query fetch of all 7 asset position fields from `:Entity` agent node
+- `format_positions_block(positions, current_prices)` — builds P&L string injected into system prompt; "no open positions" shown for new agents
+- `update_agent_positions(...)` — writes position state after reaction in a single batched `MATCH+SET`
+- New lazy-written fields on agent nodes: `position_{asset}`, `entry_price_{asset}`, `last_reaction_{asset}` (7 assets × 3 fields), `last_reaction_timestamp`
+- `_load_current_prices()` — reads most recent `backend/prices/YYYY-MM-DD.json` once per tick; passed to both P&L display and entry price recording
+- `run_tick()` updated: loads prices before agent loop; fetches positions per active agent; passes `positions_block` to `call_llm_for_agent()`; calls `update_agent_positions()` after write
+
+**TIER 2B — Continuous Conviction Scoring**
+- `build_prompt()` updated: JSON schema now includes `direction` (−1/0/+1), `conviction` (0–1), `position_size` (0–1); `confidence` retained for compatibility
+- `call_llm_for_agent()` updated: parses all three new fields with safe defaults + DEBUG logging on parse failure
+- `write_memory_event()` updated: stores `direction`, `conviction`, `position_size` on `:MemoryEvent` nodes
+- `compute_sentiment_scores()` in `investors.py` rewritten with conviction model + legacy fallback + time-decay
+
+**TIER 2C — Signal Confidence Decay**
+- `compute_sentiment_scores()` gains `apply_decay=False` parameter
+- When `apply_decay=True`: `decay = exp(-0.05 × age_hours)`, λ=0.05 → ~14h half-life
+- Applied to 24h capital-weighted path (`apply_leverage=True, apply_decay=True`) and 24h equal-weighted path (`equal_weighted=True, apply_decay=True`)
+- 7d window always uses `apply_decay=False`
+- `_SENTIMENT_QUERY` in `investors.py` updated to return `m.timestamp`, `m.direction`, `m.conviction`, `m.position_size`
+- `import math` added to `investors.py`
+
+**TIER 2D — Conviction Threshold + Drawdown Tracking**
+- `current_signals()` in `signals.py`: signals with `event_count < 200` are forced to "neutral"; `low_participation: true` added to those entries
+- `dashboard_refresh.py`: new drawdown section queries last 48 `SentimentSnapshot` nodes; computes peak/current/drawdown_pct per asset; writes to `state["drawdowns"]`
+
+### Architecture decisions
+
+- **Position write uses MATCH, not MERGE** — no risk of accidentally creating phantom agent nodes. Silent no-op if UUID doesn't match.
+- **Entry price only set on flat→long transition** — adding to an existing long preserves the original entry price. Models cost-basis accounting accurately.
+- **Panic flattens ALL assets** — not just the assets_mentioned. Full liquidation semantics match real panic behaviour.
+- **Legacy fallback in conviction scoring** — pre-TIER-2B events (null direction/conviction/position_size) use: `score = reaction_score, weight = capital × (confidence/10) × 0.3 × leverage × decay`. The `0.3` position_size default keeps legacy events proportional to new conviction-weighted events during the transition window.
+- **Drawdown is sentiment drawdown, not price drawdown** — tracks drop from peak SentimentSnapshot score within 48-snapshot rolling window. Not a price metric.
+- **200-event threshold is per-asset, per-tick** — low-participation assets (e.g. real_estate) will frequently trigger this gate early on. This is the correct behaviour — insufficient data = neutral signal.
+- **_POSITION_ASSETS list order is canonical** — `['equities', 'crypto', 'bonds', 'commodities', 'fx', 'real_estate', 'mixed']`. Used in both format_positions_block() and update_agent_positions(). Do not reorder.
+
+### Gotchas for next session
+
+- **Agent position fields are null until first reaction** — use `coalesce(a.position_equities, 'flat')` in Cypher. Never assume the field exists.
+- **`assets_mentioned` must be from `_POSITION_ASSETS` list** — LLM schema now explicitly lists the 7 asset class names (not tickers). The position update function ignores unrecognised values. If position updates aren't happening, check whether the LLM is returning tickers (e.g. "SPY") instead of asset class names.
+- **`direction`/`conviction`/`position_size` may be null on old MemoryEvents** — `compute_sentiment_scores()` handles this via `has_new_fields` check. Do not remove the legacy fallback branch.
+- **Decay formula**: `exp(-0.05 × age_hours)`. Values: 0h=1.0, 14h≈0.50, 24h≈0.30. Applied via `apply_decay=True` in `get_sentiment()` 24h calls only.
+- **`low_participation: true` in signals response** — not an error, just a data quality gate. Signal is "neutral" regardless of score. Will be common early in data accumulation.
+
+### Validation queries
+
+Check new MemoryEvent fields after next tick:
+```cypher
+MATCH (m:MemoryEvent) WHERE m.direction IS NOT NULL
+RETURN m.direction, m.conviction, m.position_size LIMIT 5
+```
+
+Check agent position fields after next tick:
+```cypher
+MATCH (a:Entity) WHERE a.position_equities IS NOT NULL
+RETURN a.name, a.position_equities, a.entry_price_equities LIMIT 5
+```
+
+Check low_participation threshold in signals:
+```
+GET http://localhost:5001/api/signals/current?graph_id=d3a38be8-37d9-4818-be28-5d2d0efa82c0
+```
+Look for `"low_participation": true` and `"event_count"` in each signal object.
+
+Check drawdowns in live state:
+```
+type backend\live\live_state.json
+```
+Look for `"drawdowns"` key (requires ≥5 SentimentSnapshots per asset in last 48 snapshots).
+
+### Modified files
+| Path | Change |
+|------|--------|
+| `backend/scripts/simulation_tick.py` | `_PRICES_DIR`; position helpers (`load_agent_positions`, `format_positions_block`, `update_agent_positions`, `_load_current_prices`); `write_memory_event()` adds direction/conviction/position_size; `build_prompt()` adds positions_block + updated JSON schema; `call_llm_for_agent()` parses new fields; `run_tick()` loads prices, fetches positions, passes blocks, calls position update |
+| `backend/app/api/investors.py` | `import math`; `_SENTIMENT_QUERY` adds timestamp/direction/conviction/position_size; `compute_sentiment_scores()` rewritten with conviction model, legacy fallback, time-decay; `get_sentiment()` passes apply_decay=True for 24h |
+| `backend/app/api/signals.py` | `current_signals()` adds 200-event threshold gate: `low_participation: true`, signal forced to "neutral" when below |
+| `backend/scripts/dashboard_refresh.py` | Drawdown section: queries last 48 SentimentSnapshots, computes peak/current/drawdown_pct per asset, writes to `state["drawdowns"]` |
+| `ROADMAP.md` | TIER 2A/2B/2C/2D marked complete; "What to Remove" updated |
+| `CLAUDE.md` | Portfolio State, Conviction Scoring, Drawdown gotcha sections added |
+
+### Deploy
+```bash
+docker cp backend/scripts/simulation_tick.py mirofish-offline:/app/backend/scripts/simulation_tick.py
+docker cp backend/app/api/signals.py mirofish-offline:/app/backend/app/api/signals.py
+docker cp backend/app/api/investors.py mirofish-offline:/app/backend/app/api/investors.py
+docker cp backend/scripts/dashboard_refresh.py mirofish-offline:/app/backend/scripts/dashboard_refresh.py
+docker restart mirofish-offline
+```
+(Done in this session. Container confirmed healthy post-restart.)
+
+
+---
+
+## Session: 2026-04-14 (continuation 2) -- TIER 2C signals.py completion + Verification Suite
+
+### What was built
+
+**TIER 2C -- signals.py fully wired to conviction model + decay**
+
+The previous session implemented the conviction model and apply_decay parameter in investors.py but did not update signals.py current_signals() to actually use it. The _SENTIMENT_QUERY in signals.py was missing m.timestamp, m.direction, m.conviction, m.position_size, a.leverage_typical -- without those fields compute_sentiment_scores(apply_leverage=True, apply_decay=True) silently fell back to the legacy formula for every event.
+
+Changes to backend/app/api/signals.py:
+
+1. _DECAY_LAMBDA = 0.05 constant -- added above _SENTIMENT_QUERY with a comment explaining lambda=0.05 gives 13.9h half-life.
+
+2. _SENTIMENT_QUERY updated -- added 5 new return columns: a.leverage_typical, m.timestamp, m.direction, m.conviction, m.position_size.
+
+3. compute_sentiment_scores(rows, apply_leverage=True, apply_decay=True) -- the 24h call in current_signals() now passes both flags. Conviction model + decay path active for TIER-2B events; legacy fallback for older events.
+
+4. data_quality field always present -- changed from "only add when degraded (price staleness)" to "always include, fresh or degraded". Degraded when: price staleness >36h OR newest MemoryEvent in 24h window is >36h old OR no events at all. Event freshness check computes max(row[timestamp]) over all rows; on parse failure assumes fresh.
+
+**verify_tier2.py** (new file at backend/scripts/verify_tier2.py)
+
+Standalone 13-check verification script. All 13 checks passed on first run.
+
+### Architecture decisions
+
+- Event freshness defaults to event_degraded=True when rows is empty -- cold start -> degraded, not fresh.
+- data_quality is now always present -- makes dashboard JS logic simpler (no null check needed).
+- _DECAY_LAMBDA is module-level in signals.py but compute_sentiment_scores() in investors.py uses its own hardcoded 0.05. The constant documents intent. If decay rate changes, update both.
+
+### Gotchas for next session
+
+- signals.py and investors.py both define lambda=0.05 separately -- update both if decay rate changes.
+- TIER 2B coverage will be low until many more ticks run -- 213/34888 = 0.6% at verification time. Expected.
+- data_quality: degraded when no events -- cold start scenario.
+- verify_tier2.py uses ASCII-safe strings (>= not >=) for Windows cp1252 terminal compatibility.
+
+### Verification output
+13/13 checks passed. All assets have >=200 events (no low_participation signals). All 7 assets appear in drawdowns.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| backend/app/api/signals.py | _DECAY_LAMBDA constant; _SENTIMENT_QUERY adds 5 new fields; current_signals() uses apply_leverage=True, apply_decay=True; event freshness check; data_quality always present |
+| CLAUDE.md | signals.py TIER 2C Gotchas section added |
+| backend/scripts/verify_tier2.py | NEW -- 13-check verification suite |
+
+### Deploy
+mirofish-offline
+(Done in this session. 13/13 checks passed.)
+
+
+---
+
+## Session: 2026-04-14 (continuation 3) -- TIER 2C-ii/2C-iii/2D-i completion + TIER 3 Macro Regime Detection
+
+### What was built
+
+**TIER 2C-ii -- Volatility-aware signal thresholds**
+
+Dynamic per-asset thresholds replacing hardcoded +-0.4. Formula: `max(0.25, min(0.6, 0.5 * std * sqrt(48)))` where std is rolling stddev of last 48 SentimentSnapshot scores. Constants: `_THRESHOLD_FALLBACK=0.4`, `_THRESHOLD_MIN=0.25`, `_THRESHOLD_MAX=0.6`.
+
+- Added `_SNAPSHOT_THRESHOLD_QUERY` -- queries ORDER BY ts DESC LIMIT 48 SentimentSnapshot nodes for all 7 assets.
+- Added `_compute_dynamic_thresholds(driver, graph_id) -> dict` -- returns per-asset threshold dict; falls back to `_THRESHOLD_FALLBACK` if <10 snapshots or computation fails.
+- Fixed critical NameError: `_signal()` used `_THRESHOLD_FALLBACK` as a default argument value, but the constant was defined *after* the function. Python evaluates default args at definition time. Fix: use `None` sentinel and resolve inside the function body.
+- `dynamic_threshold` field added to every signal entry in `/api/signals/current`.
+- Verification showed sample values: `[0.4332, 0.6, 0.6]` -- crypto assets hitting the 0.6 cap (high volatility), bonds near fallback.
+
+**TIER 2C-iii -- Archetype signal decomposition**
+
+New endpoint `GET /api/signals/archetype_split`. Splits MemoryEvents by investor_archetype: smart_money = hedge_fund + prop_trader; dumb_money = retail_amateur. Per asset: `{smart_money, dumb_money, divergence, signal, smart_event_count, dumb_event_count}`. Divergence > 0.3 -> signal = "smart_leads"; else "converging".
+
+- Added `_ARCHETYPE_SENTIMENT_QUERY` -- same conviction model + decay as current_signals() but filtered by `a.investor_archetype IN $archetypes`.
+- Added `_SMART_MONEY_ARCHETYPES = ['hedge_fund', 'prop_trader']` and `_DUMB_MONEY_ARCHETYPES = ['retail_amateur']` constants.
+- Both smart and dumb legs use `compute_sentiment_scores(apply_leverage=True, apply_decay=True)`.
+
+**TIER 2D-i -- Panic contagion injection**
+
+Transient flag file mechanism: after each tick, if any investor archetype had >50% panic rate, write `backend/briefings/contagion_flag.txt` containing a formatted alert string. At the start of the *next* tick, read and delete the flag; inject alert context only into agents with `herd_behaviour >= 7`.
+
+- `CONTAGION_FLAG_PATH` constant at module level in `simulation_tick.py`.
+- `_write_contagion_flag(tick_reactions)` -- computes per-archetype panic rates from collected reactions; writes flag if threshold exceeded; deletes stale flag on clean tick.
+- `build_prompt()` signature extended with `contagion_context=''` parameter.
+- `call_llm_for_agent()` passes contagion_context through.
+- `run_tick()`: reads flag at start into `contagion_context`; for each agent, passes `contagion_context if herd_val >= 7.0 else ''`.
+- `tick_reactions` entries now include `'archetype': agent.get('investor_archetype', 'unknown')`.
+
+**TIER 3 Part A -- OpenBB in container**
+
+OpenBB installed inside the Docker container's uv venv: `docker exec mirofish-offline uv pip install openbb --python /app/backend/.venv/bin/python`. Host Python does NOT have OpenBB -- price_fetcher.py wraps all OpenBB calls in try/except with yfinance/TLT fallbacks. This is correct -- the scheduler runs on the host and uses fallbacks.
+
+**TIER 3 Part B -- compute_market_regime() in price_fetcher.py**
+
+New function `compute_market_regime(prices_dir)` -- 4 dimensions:
+
+1. **Volatility**: 20-day annualised SPY returns stddev * sqrt(252). Thresholds: <15% LOW, 15-25% NORMAL, 25-40% HIGH, >40% EXTREME. Needs 21+ SPY prices.
+2. **Trend**: MA-20 vs MA-50 vs current. Bull if current > MA20 > MA50; Bear if opposite; Sideways if within 1% of MAs; Mixed otherwise. Needs 20+ prices.
+3. **Yield curve**: Tries `obb.fixedincome.yield_curve(provider="federal_reserve")` for 2Y/10Y spread; falls back to TLT vs SPY 5-day return correlation (negative correlation -> INVERTED etc.).
+4. **Fear**: Tries `obb.equity.price.historical("^VIX", ...)` for VIX levels; falls back to annualised vol thresholds (same as volatility but mapped to fear levels).
+
+Result written atomically to `backend/live/regime.json`. Embedded in price snapshot under `"regime"` key.
+
+With ~7 days of price history: trend=INSUFFICIENT_DATA (needs 20+ prices -- will resolve in ~3 weeks), vol=LOW_VOLATILITY, yield_curve=STABLE, fear=COMPLACENT.
+
+**TIER 3 Part C -- Regime header in briefings**
+
+`_build_regime_header()` in `news_fetcher.py` reads `backend/live/regime.json` and builds `[MARKET REGIME: {vol} | {trend} | {yc} | {fear}]`. Returns `[MARKET REGIME: COMPUTING...]` if any dimension is INSUFFICIENT_DATA or file missing. `write_briefing()` prepends the header as the first line.
+
+**TIER 3 Part D -- GET /api/live/regime**
+
+New endpoint in `live.py`. Pure file read of `backend/live/regime.json`. Returns 503 if not yet computed. Returns `{"success": true, "data": {...regime dict...}}`.
+
+**Dashboard integration**
+
+- `#regime-strip`: 4 color-coded chips (volatility/trend/yield_curve/fear) + VIX and spread displays. Below sig-strip.
+- `#drawdown-sec`: Sidebar panel showing sentiment drawdowns per asset. Hidden when all drawdowns better than -10%.
+- `#archetype-split-sec`: Main content panel with smart vs dumb money bar comparison per asset + divergence badges.
+- Regime-aware signal tiles: fear=ELEVATED_FEAR/EXTREME_FEAR adds ⚠ icon; divergent archetype split adds ⚡ REGIME CONTRA badge.
+- `fetchRegime()` and `fetchArchetypeSplit()` called in `fetchAll()`.
+- `renderDrawdowns(drawdowns)` called in `fetchLiveState()`.
+
+**verify_tier3.py**
+
+22-check verification script at `backend/scripts/verify_tier3.py`. Final run: 22/22 checks passed.
+Sample output: `dynamic_threshold sample values: [0.4332, 0.6, 0.6]`, `vol=LOW_VOLATILITY trend=INSUFFICIENT_DATA yield_curve=STABLE fear=COMPLACENT`.
+
+### Architecture decisions
+
+- trend=INSUFFICIENT_DATA is correct with <20 days of price history. Resolves naturally as daily price fetches accumulate. The briefing shows `[MARKET REGIME: COMPUTING...]` until all 4 dimensions have data.
+- OpenBB is optional -- all calls wrapped in try/except. Host scheduler uses yfinance fallbacks; container could use OpenBB but doesn't need to since price_fetcher runs on the host.
+- Contagion flag is a transient file, not a Neo4j node -- intentionally ephemeral. Writing it to Neo4j would require schema changes and add latency.
+- The contagion threshold is archetype-level (>50% panic rate for any single archetype), not portfolio-level.
+- Herd_behaviour >= 7 gate for contagion injection -- only high-herding agents are susceptible.
+
+### Gotchas for next session
+
+- **`formative_crash` key is `dotcom_2000`, not `dotcom`** -- old agents may have `dotcom` (old generate_agents.py format) which silently produces no formative crash prose. Check: `MATCH (n:Entity {formative_crash: 'dotcom'}) RETURN count(n)`.
+- **trend=INSUFFICIENT_DATA is expected for ~3 weeks** -- not a bug. MA-20 requires 20+ daily price snapshots. First usable regime will appear around 2026-05-04.
+- **OpenBB on host vs container** -- host Python has no OpenBB; yfinance fallbacks are always used. OpenBB in container is available if price_fetcher is ever containerised.
+- **NameError from default arg** -- `_signal(score, threshold=_THRESHOLD_FALLBACK)` fails if constant is defined after the function. Always use `None` sentinel for defaults that reference module-level constants.
+- **Briefings written before news_fetcher.py deploy won't have regime header** -- only briefings written after the deploy include the header. Old briefings don't need to be backfilled.
+
+### Verification output
+22/22 checks passed.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| backend/app/api/signals.py | _THRESHOLD_FALLBACK/MIN/MAX/SMART_MONEY/DUMB_MONEY constants; _SNAPSHOT_THRESHOLD_QUERY; _ARCHETYPE_SENTIMENT_QUERY; _compute_dynamic_thresholds(); _signal() None sentinel fix; dynamic_threshold in signal entries; /api/signals/archetype_split endpoint |
+| backend/scripts/simulation_tick.py | CONTAGION_FLAG_PATH; _write_contagion_flag(); build_prompt() contagion_context param; call_llm_for_agent() contagion passthrough; run_tick() flag read/consume; tick_reactions archetype field |
+| backend/scripts/price_fetcher.py | compute_market_regime() function; _LIVE_DIR; fetch_prices() embeds regime in snapshot |
+| backend/scripts/news_fetcher.py | _build_regime_header(); write_briefing() prepends header |
+| backend/app/api/live.py | _REGIME_PATH/_REGIME_PATH_ALT; _regime_path(); GET /api/live/regime endpoint |
+| frontend/public/dashboard.html | regime strip CSS+HTML; drawdown panel; archetype split panel; regime-aware signal tiles; fetchRegime(); fetchArchetypeSplit(); renderDrawdowns() |
+| backend/scripts/verify_tier3.py | NEW -- 22-check verification suite |
+| ROADMAP.md | TIER 2C-ii/2C-iii/2D-i/TIER 3 all marked complete |
+| CLAUDE.md | TIER 2C-ii/2C-iii/2D-i/TIER 3 gotchas appended |
+
+### Deploy
+All files deployed to mirofish-offline container. Container confirmed healthy post-restart. 22/22 verify_tier3.py checks passed.
+

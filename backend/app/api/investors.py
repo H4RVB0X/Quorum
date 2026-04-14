@@ -5,6 +5,7 @@ Provides endpoints for querying synthetic investor agents and their memory event
 
 import os
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from flask import Blueprint, request, jsonify, current_app
@@ -50,45 +51,117 @@ def _reaction_score(reaction: str) -> float:
 
 
 def compute_sentiment_scores(rows: list, apply_leverage: bool = False,
-                             equal_weighted: bool = False) -> dict:
+                             equal_weighted: bool = False,
+                             apply_decay: bool = False) -> dict:
     """
     Compute weighted sentiment score per asset class.
 
     Each row must have: asset_class, reaction, confidence (0-10), capital (USD).
-    Optional row fields: leverage (str) — used only when apply_leverage=True.
+    Optional row fields: leverage (str), timestamp (ISO str),
+                         direction (int), conviction (float), position_size (float).
 
     apply_leverage (bool): Multiply 24h weights by leverage multiplier.
         True for 24h window only — leverage is a short-horizon amplifier.
         False for 7d window (intentional asymmetry — do not change).
     equal_weighted (bool): If True, ignore capital; weight = confidence only.
         Shows what the unweighted agent majority thinks, regardless of AUM.
+    apply_decay (bool): Apply exponential time-decay exp(-0.05 × age_hours).
+        λ=0.05 gives ~14h half-life — semantically appropriate for the 24h
+        sentiment window (recent events dominate over stale ones).
+        Set True for 24h calculations, False for 7d (decay on 7d would collapse
+        all weight onto the most recent few hours).
+
+    TIER 2B — Conviction model (24h, apply_leverage=True, has new fields):
+        score  = direction (-1/0/+1)
+        weight = capital × conviction × position_size × leverage × decay
+    Legacy fallback (pre-TIER-2B events missing direction/conviction/position_size):
+        score  = reaction_score (buy=+1, sell=-1, hold=0, hedge=+0.5, panic=-1)
+        weight = capital × (confidence/10) × 0.3 × leverage × decay
+        (0.3 as a neutral position_size proxy for legacy events)
 
     Returns dict keyed by asset_class with {score: float, event_count: int}.
     Score is in [-1, +1].
     """
+    now = datetime.now(timezone.utc)
     buckets: dict = {}
+
     for row in rows:
-        asset = row.get('asset_class') or 'unknown'
-        capital = row.get('capital') or 0
-        confidence = row.get('confidence') or 0
-        score = _reaction_score(row.get('reaction', ''))
+        asset      = row.get('asset_class') or 'unknown'
+        capital    = float(row.get('capital')    or 0)
+        confidence = float(row.get('confidence') or 0)
+        reaction   = row.get('reaction', '')
+
+        # Time-decay: λ=0.05 → half-life ≈ 14h (appropriate for 24h window)
+        if apply_decay:
+            ts_raw = row.get('timestamp')
+            if ts_raw:
+                try:
+                    ts = datetime.fromisoformat(str(ts_raw).replace('Z', '+00:00'))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    age_hours = max(0.0, (now - ts).total_seconds() / 3600)
+                except Exception:
+                    age_hours = 0.0
+            else:
+                age_hours = 0.0
+            decay = math.exp(-0.05 * age_hours)
+        else:
+            decay = 1.0
+
+        # Detect TIER 2B fields
+        direction   = row.get('direction')
+        conviction  = row.get('conviction')
+        position_sz = row.get('position_size')
+        has_new_fields = (
+            direction   is not None and
+            conviction  is not None and
+            position_sz is not None
+        )
 
         if equal_weighted:
-            # Equal-weighted: capital has no influence; confidence still matters
-            weight = float(confidence)
+            # Equal-weighted: capital ignored; conviction replaces confidence when available
+            if has_new_fields:
+                try:
+                    score  = float(direction)
+                    conv_f = max(0.0, min(1.0, float(conviction)))
+                except (TypeError, ValueError):
+                    score  = _reaction_score(reaction)
+                    conv_f = confidence / 10.0
+                weight = conv_f * decay
+            else:
+                score  = _reaction_score(reaction)
+                weight = confidence * decay
+
         elif apply_leverage:
-            # Capital-weighted + short-horizon leverage amplifier (24h only)
             lev = _leverage_mult(row.get('leverage', 'none'))
-            weight = float(capital) * float(confidence) * lev
+            if has_new_fields:
+                # TIER 2B conviction model
+                try:
+                    score    = float(direction)
+                    conv_f   = max(0.0, min(1.0, float(conviction)))
+                    pos_sz_f = max(0.0, min(1.0, float(position_sz)))
+                except (TypeError, ValueError):
+                    # Field present but unparseable — fall back to legacy
+                    score    = _reaction_score(reaction)
+                    conv_f   = confidence / 10.0
+                    pos_sz_f = 0.3
+                weight = capital * conv_f * pos_sz_f * lev * decay
+            else:
+                # Legacy fallback: pre-TIER-2B MemoryEvents
+                # Use 0.3 as default position_size to keep legacy events in range
+                score  = _reaction_score(reaction)
+                weight = capital * (confidence / 10.0) * 0.3 * lev * decay
+
         else:
-            # Standard capital-weighted (default, used for 7d and backtest)
-            weight = float(capital) * float(confidence)
+            # Standard capital-weighted (7d window; no leverage, no conviction model)
+            score  = _reaction_score(reaction)
+            weight = capital * confidence * decay
 
         if asset not in buckets:
             buckets[asset] = {'weighted_sum': 0.0, 'total_weight': 0.0, 'event_count': 0}
         buckets[asset]['weighted_sum'] += score * weight
         buckets[asset]['total_weight'] += weight
-        buckets[asset]['event_count'] += 1
+        buckets[asset]['event_count']  += 1
 
     result = {}
     for asset, b in buckets.items():
@@ -98,7 +171,7 @@ def compute_sentiment_scores(rows: list, apply_leverage: bool = False,
             raw = b['weighted_sum'] / b['total_weight']
             final_score = max(-1.0, min(1.0, raw))
         result[asset] = {
-            'score': round(final_score, 4),
+            'score':       round(final_score, 4),
             'event_count': b['event_count'],
         }
     return result
@@ -446,7 +519,7 @@ def get_sentiment():
     if not graph_id:
         return jsonify({"success": False, "error": "graph_id required"}), 400
 
-    # Fetch leverage_typical for the 24h leverage-weighted path
+    # Fetch leverage_typical + TIER 2B conviction fields for the 24h weighted path
     _SENTIMENT_QUERY = """
         MATCH (a:Entity {graph_id: $gid, is_synthetic: true})-[:HAS_MEMORY]->(m:MemoryEvent)
         WHERE m.timestamp >= $since
@@ -455,7 +528,11 @@ def get_sentiment():
             m.reaction           AS reaction,
             m.confidence         AS confidence,
             a.capital_usd        AS capital,
-            a.leverage_typical   AS leverage
+            a.leverage_typical   AS leverage,
+            m.timestamp          AS timestamp,
+            m.direction          AS direction,
+            m.conviction         AS conviction,
+            m.position_size      AS position_size
     """
 
     try:
@@ -469,13 +546,13 @@ def get_sentiment():
             rows_24h = session.run(_SENTIMENT_QUERY, gid=graph_id, since=ts_24h).data()
             rows_7d  = session.run(_SENTIMENT_QUERY, gid=graph_id, since=ts_7d).data()
 
-        # Capital-weighted (24h applies leverage multiplier; 7d does not)
-        scores_24h = compute_sentiment_scores(rows_24h, apply_leverage=True)
-        scores_7d  = compute_sentiment_scores(rows_7d,  apply_leverage=False)
+        # Capital-weighted (24h: conviction model + leverage + decay; 7d: standard)
+        scores_24h = compute_sentiment_scores(rows_24h, apply_leverage=True,  apply_decay=True)
+        scores_7d  = compute_sentiment_scores(rows_7d,  apply_leverage=False, apply_decay=False)
 
-        # Equal-weighted (confidence only, capital has no influence)
-        scores_24h_eq = compute_sentiment_scores(rows_24h, equal_weighted=True)
-        scores_7d_eq  = compute_sentiment_scores(rows_7d,  equal_weighted=True)
+        # Equal-weighted (confidence/conviction only; decay applied to 24h for consistency)
+        scores_24h_eq = compute_sentiment_scores(rows_24h, equal_weighted=True, apply_decay=True)
+        scores_7d_eq  = compute_sentiment_scores(rows_7d,  equal_weighted=True, apply_decay=False)
 
         all_assets = set(scores_24h) | set(scores_7d) | set(scores_24h_eq) | set(scores_7d_eq)
         by_asset_class = {}
