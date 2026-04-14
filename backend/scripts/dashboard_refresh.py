@@ -460,7 +460,10 @@ def refresh(graph_id: str) -> None:
                         continue  # insufficient data for this asset
                     current_val = values[0]  # most recent (DESC order)
                     peak_val    = max(values)
-                    dd_pct      = (current_val - peak_val) / abs(peak_val) * 100 if peak_val != 0 else 0.0
+                    if abs(peak_val) < 0.1:
+                        continue  # near-zero peak causes meaningless / exploding drawdown
+                    dd_pct = (current_val - peak_val) / abs(peak_val) * 100
+                    dd_pct = max(-100.0, dd_pct)  # safety clamp — score is bounded [-1,+1]
                     drawdowns[asset] = {
                         "peak":         round(peak_val, 4),
                         "current":      round(current_val, 4),

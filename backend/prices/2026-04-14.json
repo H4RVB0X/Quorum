@@ -1,24 +1,24 @@
 {
   "date": "2026-04-14",
-  "fetched_at": "2026-04-14T10:34:34.117086+00:00",
+  "fetched_at": "2026-04-14T18:46:43.639533+00:00",
   "prices": {
-    "equities": 686.099976,
-    "crypto": 74638.070312,
-    "bonds": 86.75,
-    "commodities": 435.359985,
-    "fx": 98.102997,
-    "mixed": 146.399994,
-    "real_estate": 93.330002
+    "equities": 692.565002,
+    "crypto": 74307.96875,
+    "bonds": 87.120003,
+    "commodities": 444.100006,
+    "fx": 98.112,
+    "mixed": 147.774994,
+    "real_estate": 94.014999
   },
   "regime": {
     "volatility": "LOW_VOLATILITY",
     "trend": "INSUFFICIENT_DATA",
     "yield_curve": "STABLE",
     "fear": "COMPLACENT",
-    "annualised_vol_pct": 14.0,
+    "annualised_vol_pct": 13.6,
     "vix": null,
     "yield_spread_pct": null,
-    "computed_at": "2026-04-14T10:34:34.117448+00:00",
+    "computed_at": "2026-04-14T18:46:43.639823+00:00",
     "data_sources": [
       "price_history",
       "fallback_tlt_spy"

@@ -22,9 +22,9 @@ Every 30 minutes, an autonomous pipeline:
 4. Writes each reaction as a `MemoryEvent` node in Neo4j, linked to the agent
 5. Fetches daily closing prices for 7 asset-class proxies
 
-A daily job at 03:00 runs the full tick across all 8,192 agents.
+A daily job at 20:00 (Europe/London scheduler time) runs the full tick across all 8,192 agents.
 
-On startup and after every job completes, the scheduler runs a catch-up check: if the daily job hasn't run today (UTC) and it is past 03:00 UTC, it fires immediately; if the last half-hourly tick finished more than 30 minutes ago (or no record exists), it fires immediately. Daily always takes priority. Every job completion — success or error — is appended to `backend/logs/scheduler_runs.json` as a permanent audit trail (capped at 10,000 entries).
+On startup and after every job completes, the scheduler runs a catch-up check: if the daily job hasn't run today (UTC) and it is past 20:00 UTC, it fires immediately; if the last half-hourly tick finished more than 30 minutes ago (or no record exists), it fires immediately. Daily always takes priority. Every job completion — success, error, or `model_unavailable` — is appended to `backend/logs/scheduler_runs.json` as a permanent audit trail (capped at 10,000 entries).
 
 The resulting sentiment scores — weighted by agent capital and conviction — feed a live dashboard showing trading signals, sentiment charts, agent distributions, and a real-time memory event feed.
 
@@ -35,7 +35,7 @@ The resulting sentiment scores — weighted by agent capital and conviction — 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                        scheduler.py                              │
-│  APScheduler — 30-min news+tick job, 03:00 daily full run       │
+│  APScheduler — 30-min news+tick job, 20:00 daily full run       │
 │  Catch-up on startup + after each job · run log in backend/logs │
 └──────┬─────────────────────┬───────────────────────┬────────────┘
        │                     │                       │
@@ -60,12 +60,14 @@ The resulting sentiment scores — weighted by agent capital and conviction — 
 │  /api/signals/history           │   │  Writes backend/live/            │
 │  /api/signals/backtest          │   │    live_state.json               │
 │  /api/signals/sentiment_history │   │    price_sentiment_history.json  │
-│  /api/investors/stats           │   └──────────────┬───────────────────┘
-│  /api/investors/agents          │                  │ bind mount
-│  /api/live/state  (file read)   │   ┌──────────────▼───────────────────┐
-│  /api/live/history (file read)  │   │  backend/live/  ← volume mount   │
-│  /dashboard                     │   │  ./backend/live:/app/backend/live│
-└─────────────────────────────────┘   └──────────────────────────────────┘
+│  /api/signals/archetype_split   │   └──────────────┬───────────────────┘
+│  /api/investors/stats           │                  │ bind mount
+│  /api/investors/agents          │   ┌──────────────▼───────────────────┐
+│  /api/live/state  (file read)   │   │  backend/live/  ← volume mount   │
+│  /api/live/history (file read)  │   │  ./backend/live:/app/backend/live│
+│  /api/live/regime (file read)   │   └──────────────────────────────────┘
+│  /dashboard                     │
+└─────────────────────────────────┘
 ```
 
 ---
@@ -207,7 +209,14 @@ Daily closing prices for 7 asset-class proxies via yfinance. Reliability improve
 
 ### Sentiment Scoring
 
-All `MemoryEvent` nodes from the last 24h and 7 days are queried. Each event is weighted by `capital_usd × confidence`. For the 24h window, an additional leverage multiplier is applied (`none=1.0×`, `2x=1.3×`, `5x=1.6×`, `10x_plus=2.0×`) — leverage amplifies short-horizon signal weight. The 7d window uses no leverage multiplier (intentional asymmetry). An equal-weighted path (weight = confidence only, capital ignored) is also computed and returned alongside the capital-weighted scores. Reactions map to scores:
+All `MemoryEvent` nodes from the last 24h and 7 days are queried. The 24h path is conviction-aware and time-decayed; the 7d path is intentionally simpler.
+
+- **24h path (primary):** if event fields include `direction`, `conviction`, and `position_size`, score = `direction`, and weight = `capital_usd × conviction × position_size × leverage × decay`.
+- **Legacy fallback:** score uses reaction mapping and weight = `capital_usd × (confidence/10) × 0.3 × leverage × decay`.
+- **7d path:** no leverage multiplier and no decay (intentional asymmetry).
+- **Equal-weighted path:** confidence/conviction-weighted scores with capital ignored.
+
+Legacy reaction mapping (fallback path):
 
 | Reaction | Score |
 |---|---|
@@ -221,15 +230,19 @@ The capital-weighted average per asset class is clipped to `[−1, +1]`.
 
 ### Trading Signals
 
-24h sentiment scores are combined with the latest price snapshot. Threshold logic:
+24h sentiment scores are combined with the latest price snapshot. Thresholds are volatility-aware per asset:
+
+- `threshold = clamp(0.5 × std × sqrt(48), 0.25, 0.55)` from recent `SentimentSnapshot` history
+- fallback threshold `0.4` when there are fewer than 10 snapshots
+- if `event_count < 200`, signal is forced to `neutral` (`low_participation=true`)
 
 | Sentiment score | Signal |
 |---|---|
-| > +0.4 | bullish |
-| < −0.4 | bearish |
+| > +threshold | bullish |
+| < −threshold | bearish |
 | between | neutral |
 
-Also returns `price_change_24h` (% vs previous day's close) per asset class.
+Also returns `price_change_24h` (% vs previous day's close), `dynamic_threshold`, and `data_quality` per asset class.
 
 ---
 
@@ -279,7 +292,7 @@ Quorum/
 │   │   ├── api/
 │   │   │   ├── investors.py          # /api/investors/* — stats, agents, sentiment
 │   │   │   ├── signals.py            # /api/signals/* — current signals, history
-│   │   │   ├── live.py               # /api/live/state — serves live_state.json (no Neo4j)
+│   │   │   ├── live.py               # /api/live/* — serves file-backed live state/history/regime (no Neo4j)
 │   │   │   ├── graph.py              # Knowledge graph API routes
 │   │   │   ├── simulation.py         # OASIS simulation routes
 │   │   │   └── control.py            # Pipeline control endpoints
@@ -300,11 +313,14 @@ Quorum/
 │   │   ├── backtester.py             # Signal accuracy backtest (per-asset, per-archetype, calibration)
 │   │   ├── verify_agent_diversity.py # 8-check diversity audit (incl. reaction diversity Check 8)
 │   │   ├── scheduler.py              # APScheduler orchestrator (simulation pipeline)
-│   │   └── dashboard_refresh.py      # Separate process — writes live_state.json every 15 min
+│   │   └── dashboard_refresh.py      # Separate process — writes live_state + history every 15 min
 │   ├── briefings/                    # Timestamped news briefing files
 │   ├── logs/                         # scheduler_runs.json — append-only job audit log
 │   ├── prices/                       # Daily price snapshots (JSON)
-│   ├── live_state.json               # Live dashboard state — written by dashboard_refresh.py
+│   ├── live/                         # File-backed live dashboard data
+│   │   ├── live_state.json           # Current live dashboard state
+│   │   ├── price_sentiment_history.json
+│   │   └── regime.json               # Current market regime snapshot
 │   └── tests/
 │       ├── test_sentiment.py
 │       └── test_traits.py

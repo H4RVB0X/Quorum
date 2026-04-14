@@ -1,10 +1,14 @@
 """
 incremental_update.py — Process a briefing .txt file into the Neo4j knowledge graph.
 
-Extracts entities via spaCy NER (en_core_web_sm) and MERGEs them into Neo4j using
-batched UNWIND queries (batch size 500). This replaces the previous LLM-based NER
-pipeline, which made one Ollama call per chunk and took 6–8 hours for a 2160-chunk
-briefing. spaCy brings that to under 2 minutes.
+Extracts entities via spaCy NER (en_core_web_sm), then writes:
+    - Entity nodes (:Entity)
+    - Chunk nodes (:NewsChunk)
+    - Entity→chunk links (:MENTIONED_IN)
+    - Entity↔entity co-occurrence links (:MENTIONED_WITH, weighted)
+
+All writes use batched UNWIND queries (batch size 500). This keeps the speed
+advantage over the previous LLM-per-chunk NER pipeline while restoring graph edges.
 
 Never overwrites properties on synthetic agent nodes (is_synthetic=True).
 
@@ -16,9 +20,11 @@ import os
 import json
 import uuid
 import time
+import hashlib
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
+from itertools import combinations
 from typing import List, Dict, Any, Tuple
 
 import spacy
@@ -121,6 +127,55 @@ ON MATCH SET
         ELSE n.central_bank_source
     END,
     n.mention_count       = CASE WHEN n.is_synthetic THEN n.mention_count ELSE e.mention_count END
+"""
+
+# Batched chunk node upsert. One NewsChunk per (graph_id, chunk_id).
+BATCH_MERGE_CHUNK_QUERY = """
+UNWIND $chunks AS ch
+MERGE (c:NewsChunk {graph_id: $gid, chunk_id: ch.chunk_id})
+ON CREATE SET
+    c.uuid            = ch.uuid,
+    c.briefing_source = ch.briefing_source,
+    c.chunk_index     = ch.chunk_index,
+    c.chunk_hash      = ch.chunk_hash,
+    c.preview         = ch.preview,
+    c.created_at      = $now,
+    c.last_seen       = datetime()
+ON MATCH SET
+    c.briefing_source = ch.briefing_source,
+    c.chunk_index     = ch.chunk_index,
+    c.preview         = ch.preview,
+    c.last_seen       = datetime()
+"""
+
+# Link entities to source chunks (graph navigation path: Entity -> NewsChunk).
+BATCH_MENTIONED_IN_QUERY = """
+UNWIND $rows AS row
+MATCH (c:NewsChunk {graph_id: $gid, chunk_id: row.chunk_id})
+UNWIND row.entity_name_lowers AS name_lower
+MATCH (e:Entity {graph_id: $gid, name_lower: name_lower})
+MERGE (e)-[r:MENTIONED_IN]->(c)
+ON CREATE SET
+    r.first_seen = datetime(),
+    r.last_seen  = datetime()
+ON MATCH SET
+    r.last_seen  = datetime()
+"""
+
+# Weighted co-occurrence link between entities that appeared in the same chunk.
+BATCH_MENTIONED_WITH_QUERY = """
+UNWIND $pairs AS pair
+MATCH (a:Entity {graph_id: $gid, name_lower: pair.a})
+MATCH (b:Entity {graph_id: $gid, name_lower: pair.b})
+WHERE a.name_lower < b.name_lower
+MERGE (a)-[r:MENTIONED_WITH]-(b)
+ON CREATE SET
+    r.weight     = pair.weight,
+    r.first_seen = datetime(),
+    r.last_seen  = datetime()
+ON MATCH SET
+    r.weight     = coalesce(r.weight, 0) + pair.weight,
+    r.last_seen  = datetime()
 """
 
 # Exposed so tests can inspect
@@ -268,12 +323,93 @@ def batch_merge_entities(
     return total
 
 
+def batch_merge_chunks(
+    session,
+    graph_id: str,
+    chunk_rows: List[Dict[str, Any]],
+    now: str,
+) -> int:
+    """UNWIND-merge NewsChunk nodes in batches of BATCH_SIZE."""
+    if not chunk_rows:
+        return 0
+
+    payload = [
+        {
+            "uuid": str(uuid.uuid4()),
+            "chunk_id": row["chunk_id"],
+            "briefing_source": row["briefing_source"],
+            "chunk_index": row["chunk_index"],
+            "chunk_hash": row["chunk_hash"],
+            "preview": row["preview"],
+        }
+        for row in chunk_rows
+    ]
+
+    total = 0
+    for i in range(0, len(payload), BATCH_SIZE):
+        batch = payload[i : i + BATCH_SIZE]
+        session.run(BATCH_MERGE_CHUNK_QUERY, chunks=batch, gid=graph_id, now=now)
+        total += len(batch)
+    return total
+
+
+def batch_link_entities_to_chunks(
+    session,
+    graph_id: str,
+    chunk_rows: List[Dict[str, Any]],
+) -> int:
+    """
+    Link entities to their source chunks with :MENTIONED_IN edges.
+
+    Returns the number of attempted entity->chunk links.
+    """
+    if not chunk_rows:
+        return 0
+
+    attempted_links = 0
+    for i in range(0, len(chunk_rows), BATCH_SIZE):
+        batch = chunk_rows[i : i + BATCH_SIZE]
+        attempted_links += sum(len(r.get("entity_name_lowers", [])) for r in batch)
+        session.run(BATCH_MENTIONED_IN_QUERY, rows=batch, gid=graph_id)
+
+    return attempted_links
+
+
+def batch_merge_cooccurrence_pairs(
+    session,
+    graph_id: str,
+    pair_weights: Dict[Tuple[str, str], int],
+) -> int:
+    """
+    Merge weighted :MENTIONED_WITH links for co-occurring entity pairs.
+
+    pair_weights maps (name_lower_a, name_lower_b) -> chunk co-occurrence count.
+    Returns the number of distinct pairs merged.
+    """
+    if not pair_weights:
+        return 0
+
+    payload = [
+        {"a": a, "b": b, "weight": int(w)}
+        for (a, b), w in pair_weights.items()
+    ]
+
+    total = 0
+    for i in range(0, len(payload), BATCH_SIZE):
+        batch = payload[i : i + BATCH_SIZE]
+        session.run(BATCH_MENTIONED_WITH_QUERY, pairs=batch, gid=graph_id)
+        total += len(batch)
+
+    return total
+
+
 # ---------------------------------------------------------------------------
 # Main processing
 # ---------------------------------------------------------------------------
 
 def process_briefing(driver, graph_id: str, briefing_path: str) -> None:
     t_start = time.time()
+    briefing_source = Path(briefing_path).name
 
     # Read and preprocess briefing
     text = Path(briefing_path).read_text(encoding='utf-8')
@@ -291,8 +427,12 @@ def process_briefing(driver, graph_id: str, briefing_path: str) -> None:
     # central_bank_source is OR-ed: if any chunk marks it true, it stays true.
     # ------------------------------------------------------------------
     global_entities: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    chunk_rows: List[Dict[str, Any]] = []
+    pair_weights: Dict[Tuple[str, str], int] = {}
 
-    for chunk in chunks:
+    for chunk_idx, chunk in enumerate(chunks):
+        chunk_entity_lowers: set = set()
+
         for ent in extract_entities_spacy(chunk):
             key = (ent["name"].lower(), ent["type"])
             if key not in global_entities:
@@ -302,6 +442,27 @@ def process_briefing(driver, graph_id: str, briefing_path: str) -> None:
                 global_entities[key]["mention_count"] = global_entities[key].get("mention_count", 1) + 1
                 if ent["central_bank_source"]:
                     global_entities[key]["central_bank_source"] = True
+
+            chunk_entity_lowers.add(ent["name"].lower())
+
+        if chunk_entity_lowers:
+            chunk_hash = hashlib.sha256(chunk.encode('utf-8')).hexdigest()
+            chunk_id = f"{Path(briefing_path).stem}:{chunk_idx:05d}:{chunk_hash[:16]}"
+            preview = " ".join(chunk.split())[:220]
+
+            sorted_entity_lowers = sorted(chunk_entity_lowers)
+            chunk_rows.append({
+                "chunk_id": chunk_id,
+                "briefing_source": briefing_source,
+                "chunk_index": int(chunk_idx),
+                "chunk_hash": chunk_hash,
+                "preview": preview,
+                "entity_name_lowers": sorted_entity_lowers,
+            })
+
+            if len(sorted_entity_lowers) >= 2:
+                for a, b in combinations(sorted_entity_lowers, 2):
+                    pair_weights[(a, b)] = pair_weights.get((a, b), 0) + 1
 
     unique_entities = list(global_entities.values())
     logger.info(
@@ -319,9 +480,14 @@ def process_briefing(driver, graph_id: str, briefing_path: str) -> None:
 
     with driver.session() as session:
         merged = batch_merge_entities(session, graph_id, unique_entities, now)
+        chunk_nodes = batch_merge_chunks(session, graph_id, chunk_rows, now)
+        mention_links = batch_link_entities_to_chunks(session, graph_id, chunk_rows)
+        pair_links = batch_merge_cooccurrence_pairs(session, graph_id, pair_weights)
 
     elapsed = time.time() - t_start
     logger.info(f"Merged {merged} unique entities into Neo4j")
+    logger.info(f"Merged {chunk_nodes} NewsChunk nodes and {mention_links} MENTIONED_IN links")
+    logger.info(f"Merged {pair_links} weighted MENTIONED_WITH links")
     logger.info(f"Briefing processed in {elapsed:.1f}s: {briefing_path}")
 
 

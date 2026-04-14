@@ -147,6 +147,57 @@ def get_agent_pool_size(driver, graph_id: str) -> int:
         return -1
 
 
+def _briefing_graph_links_ready(driver, graph_id: str, briefing_source: str) -> bool:
+    """
+    Return True when graph-link context required by simulation_tick is already present
+    for this briefing (NewsChunk nodes + MENTIONED_IN edges).
+
+    This avoids running incremental_update twice for the same briefing, which would
+    inflate MENTIONED_WITH weights due to ON MATCH weight increments.
+    """
+    try:
+        with driver.session() as session:
+            labels_row = session.run(
+                "CALL db.labels() YIELD label RETURN collect(label) AS labels"
+            ).single()
+            rels_row = session.run(
+                "CALL db.relationshipTypes() YIELD relationshipType RETURN collect(relationshipType) AS rels"
+            ).single()
+
+            labels = labels_row["labels"] if labels_row and labels_row["labels"] is not None else []
+            rels = rels_row["rels"] if rels_row and rels_row["rels"] is not None else []
+
+            if "NewsChunk" not in labels or "MENTIONED_IN" not in rels:
+                return False
+
+            chunks_row = session.run(
+                """
+                MATCH (c:NewsChunk {graph_id: $gid, briefing_source: $briefing})
+                RETURN count(c) AS c
+                """,
+                gid=graph_id,
+                briefing=briefing_source,
+            ).single()
+            chunk_count = int(chunks_row["c"]) if chunks_row and chunks_row["c"] is not None else 0
+            if chunk_count == 0:
+                return False
+
+            links_row = session.run(
+                """
+                MATCH (:Entity {graph_id: $gid})-[r:MENTIONED_IN]->(c:NewsChunk {graph_id: $gid, briefing_source: $briefing})
+                RETURN count(r) AS c
+                """,
+                gid=graph_id,
+                briefing=briefing_source,
+            ).single()
+            link_count = int(links_row["c"]) if links_row and links_row["c"] is not None else 0
+            return link_count > 0
+
+    except Exception as e:
+        logger.warning(f"Graph-link readiness check failed for '{briefing_source}': {e}")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Catch-up logic
 # ---------------------------------------------------------------------------
@@ -452,6 +503,10 @@ def daily_job(graph_id: str, status_path: Path, status_state: dict) -> None:
     Full 8192-agent simulation tick. Sets _daily_running mutex for duration.
     Uses the most recent briefing file (latest .txt in briefings dir).
 
+    Before tick execution, performs a readiness check for NewsChunk/MENTIONED_IN
+    data used by simulation_tick graph-link prompt context. If missing, runs
+    process_briefing() once for that briefing.
+
     Writes a log entry to scheduler_runs.json on completion (success or error).
     Runs catch-up check after completing — specifically to fire any half-hourly
     tick that became overdue during the (potentially long) daily run.
@@ -494,6 +549,23 @@ def daily_job(graph_id: str, status_path: Path, status_state: dict) -> None:
 
         latest_briefing = briefing_files[0]
         logger.info(f"Daily tick using briefing: {latest_briefing}")
+
+        # Ensure graph-link context exists for the selected daily briefing.
+        # Run incremental_update only when missing to avoid double-counting
+        # MENTIONED_WITH weights for already-processed briefings.
+        briefing_source = latest_briefing.name
+        links_ready = _briefing_graph_links_ready(_driver, graph_id, briefing_source)
+        if not links_ready:
+            logger.info(
+                "Daily pre-pass: graph link data missing for briefing — running incremental_update"
+            )
+            try:
+                process_briefing(_driver, graph_id, str(latest_briefing))
+                logger.info("Daily pre-pass incremental update complete")
+            except Exception as e:
+                logger.warning(f"Daily pre-pass incremental update failed: {e}")
+        else:
+            logger.info("Daily pre-pass: graph link data already present — skipping incremental_update")
 
         try:
             run_tick(_driver, graph_id, str(latest_briefing), full=True)

@@ -1080,6 +1080,45 @@ docker cp backend/scripts/incremental_update.py mirofish-offline:/app/backend/sc
 docker cp backend/scripts/simulation_tick.py mirofish-offline:/app/backend/scripts/simulation_tick.py
 docker restart mirofish-offline
 ```
+
+---
+
+## Session: 2026-04-14 — Scheduler Daily Pre-pass Validation (Host Runtime)
+
+### Problem
+Confirm that the `scheduler.py` daily pre-pass fix works when scripts are run directly on the host (not copied into Docker), and that it prevents the `NewsChunk` / `MENTIONED_IN` missing-schema warning path.
+
+### What was validated
+
+- User ran `python scripts/scheduler.py --graph-id d3a38be8-37d9-4818-be28-5d2d0efa82c0` locally from PowerShell.
+- Daily startup catch-up reached the patched branch and logged:
+  - `Daily pre-pass: graph link data already present — skipping incremental_update`
+- The previous Neo4j warnings about missing `NewsChunk` label / `MENTIONED_IN` relationship did not appear.
+- Tick startup continued normally with:
+  - `Graph link context loaded for prompt injection`
+  - `Loaded current prices for 7 assets`
+- This confirms the fix is active in the host runtime path.
+
+### Architecture notes
+
+- Daily pre-pass is intentionally conditional:
+  - If graph links exist for the selected briefing: skip `process_briefing`.
+  - If missing: run `process_briefing` once before `run_tick`.
+- This preserves prompt graph-link availability while avoiding duplicate co-occurrence increments.
+
+### Gotchas for next session
+
+- If the latest daily briefing has not yet been incrementally processed, daily run should log the pre-pass `running incremental_update` branch once.
+- If links are already present, seeing `skipping incremental_update` is the correct path and avoids `MENTIONED_WITH.weight` inflation.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| backend/scripts/scheduler.py | (Previously patched) daily pre-pass readiness check validated in host runtime |
+| PROJECT_MEMORY.md | Added this validation session block |
+
+### Deploy
+No Docker copy/restart required for this validation path; scripts were run directly on host PowerShell.
 (Already deployed in this session.)
 
 ---
@@ -1686,4 +1725,116 @@ Sample output: `dynamic_threshold sample values: [0.4332, 0.6, 0.6]`, `vol=LOW_V
 
 ### Deploy
 All files deployed to mirofish-offline container. Container confirmed healthy post-restart. 22/22 verify_tier3.py checks passed.
+
+---
+
+## Session: 2026-04-14 — force_retick.py Full Reset Fix (checkpoint + MemoryEvent wipe)
+
+### Problem
+Running `force_retick.py` before starting `scheduler.py` still allowed the next tick to resume old progress (`Resuming: ... already processed`) because the script did not clear `backend/scripts/tick_checkpoint.json`. It also did not clear Neo4j `MemoryEvent` history, so agent memory context persisted.
+
+### What was built
+
+Updated `backend/scripts/force_retick.py` to perform a full reset path:
+
+1. Existing behavior kept:
+- Backdate last `halfhourly` `finished_at` in `backend/logs/scheduler_runs.json` by 2h.
+- Remove recent `seen_urls.json` entries inside `--hours` window.
+
+2. New local state reset:
+- Delete `backend/scripts/tick_checkpoint.json` (unless `--keep-checkpoint`).
+- Delete `backend/briefings/contagion_flag.txt` (unless `--keep-contagion-flag`).
+
+3. New Neo4j memory reset:
+- Resolve `graph_id` from `--graph-id` or auto-detect from `uploads/projects`.
+- Delete all `MemoryEvent` nodes for that `graph_id` in 10,000-node batches using `DETACH DELETE` (unless `--keep-memory-events`).
+- Print before/after counts.
+
+4. New CLI flags:
+- `--graph-id <uuid>`
+- `--keep-memory-events`
+- `--keep-checkpoint`
+- `--keep-contagion-flag`
+- `--dry-run` (existing)
+
+### Validation
+
+Dry-run executed successfully:
+- Detected checkpoint file and reported it would be deleted.
+- Detected MemoryEvent count and reported full graph wipe would run.
+- No syntax errors in `force_retick.py`.
+
+### Gotchas for next session
+
+- Catch-up priority is still daily-first after the configured daily time; this is expected. The fix ensures daily/halfhourly runs start clean instead of resuming stale checkpoint state.
+- If Neo4j is unavailable, Step 4 fails fast and exits with error.
+- Memory wipe is graph-scoped (`MemoryEvent {graph_id: ...}`), not global.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| backend/scripts/force_retick.py | Added checkpoint/contagion cleanup, graph-scoped MemoryEvent wipe, graph-id resolution, new CLI flags, updated docs |
+| PROJECT_MEMORY.md | Added this session block |
+
+### Usage
+```bash
+# Preview changes
+python backend/scripts/force_retick.py --dry-run --graph-id d3a38be8-37d9-4818-be28-5d2d0efa82c0 --hours 1
+
+# Apply full reset
+python backend/scripts/force_retick.py --graph-id d3a38be8-37d9-4818-be28-5d2d0efa82c0 --hours 1
+```
+
+---
+
+## Session: 2026-04-14 — Graph Relationship Restoration (spaCy + Co-occurrence + Agent Link Context)
+
+### What was built
+
+Implemented relationship writing in the fast spaCy pipeline so the graph is no longer node-only.
+
+**`backend/scripts/incremental_update.py`**
+- Added `:NewsChunk` node writes (batched UNWIND) keyed by `(graph_id, chunk_id)`.
+- Added `:MENTIONED_IN` links from entities to chunk nodes.
+- Added weighted `:MENTIONED_WITH` links for within-chunk co-occurrence.
+- Co-occurrence is computed in Python per chunk using unique entity names (`i < j` pairs), then merged in batches with `weight += pair.weight` on match.
+- Chunk IDs now include briefing stem + chunk index + SHA256 prefix to keep them deterministic and collision-resistant.
+- Logging now reports counts for entity merges, NewsChunk merges, MENTIONED_IN links, and MENTIONED_WITH pairs.
+
+**`backend/scripts/simulation_tick.py`**
+- Added `load_briefing_link_context()` to pull top entity co-mention pairs from `NewsChunk` + `MENTIONED_IN` for the current briefing.
+- Injected that graph-link summary into agent system prompts (`graph_links_block`) so agents can use explicit graph structure when deciding reactions.
+- Extended `write_memory_event()` to accept `graph_id` and create `(:MemoryEvent)-[:CONCERNS]->(:Entity)` links from `assets_mentioned`.
+- If a concern entity does not exist, it is created as `type='AssetClass'` with `name_lower` merge key (graph-scoped), then linked.
+- Added `graph_id` property on new `MemoryEvent` nodes for safer multi-graph filtering.
+
+### Architecture decisions
+
+- **Preserve speed by batching everything** — no per-chunk transaction loop in Neo4j. Extraction still happens once in Python, then all writes are UNWIND-batched.
+- **Co-occurrence weights represent chunk-level frequency** — each pair weight increments by number of chunks co-mentioned, not token frequency.
+- **Chunk links are first-class** — `Entity -> MENTIONED_IN -> NewsChunk` makes provenance traversal explicit and enables later retrieval or explainability features.
+- **Prompt link context loaded once per tick** — avoids expensive per-agent graph queries while still giving agents relationship structure.
+- **CONCERNS uses asset-class entities** — keeps agent-event-asset traversal explicit even when assets are abstract classes (equities/crypto/etc.), not named companies.
+
+### Gotchas for next session
+
+- **Existing historical briefings are not backfilled** — only briefings processed after this change will have `NewsChunk`, `MENTIONED_IN`, and `MENTIONED_WITH` data.
+- **`MENTIONED_WITH.weight` is cumulative across runs** — rerunning the same briefing will increase weights unless you dedupe at run orchestration level.
+- **Graph link prompt context depends on prior incremental update** — if `simulation_tick.py` is run on a briefing before `incremental_update.py`, `graph_links_block` will be empty (safe fallback).
+- **`assets_mentioned` remains stored as JSON string** for backward compatibility; new `CONCERNS` edges are the graph-native traversal path.
+
+### Modified files
+| Path | Change |
+|------|--------|
+| backend/scripts/incremental_update.py | Added NewsChunk merges, MENTIONED_IN links, weighted MENTIONED_WITH merges, chunk/pair batching, hash-based chunk IDs |
+| backend/scripts/simulation_tick.py | Added graph link context query + prompt injection; write_memory_event graph_id + CONCERNS relationships |
+| PROJECT_MEMORY.md | Added this session block |
+
+### Setup needed
+```bash
+docker cp backend/scripts/incremental_update.py mirofish-offline:/app/backend/scripts/incremental_update.py
+docker cp backend/scripts/simulation_tick.py mirofish-offline:/app/backend/scripts/simulation_tick.py
+docker restart mirofish-offline
+```
+
 

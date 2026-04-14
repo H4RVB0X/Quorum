@@ -123,7 +123,7 @@ _DECAY_LAMBDA = 0.05
 # If fewer than 10 snapshots exist for an asset, fall back to _THRESHOLD_FALLBACK.
 _THRESHOLD_FALLBACK = 0.4
 _THRESHOLD_MIN      = 0.25
-_THRESHOLD_MAX      = 0.6
+_THRESHOLD_MAX      = 0.55
 
 # Archetype groups for the smart/dumb money split (TIER 2C-iii).
 _SMART_MONEY_ARCHETYPES = ['hedge_fund', 'prop_trader']

@@ -328,6 +328,49 @@ def load_agent_recent_memory(driver, agent_uuid: str, limit: int = 5) -> list:
         return [dict(r) for r in result]
 
 
+def load_briefing_link_context(driver, graph_id: str, briefing_source: str, limit: int = 10) -> str:
+    """
+    Return a compact graph-link summary for the current briefing.
+
+    Uses NewsChunk + MENTIONED_IN links to derive the strongest co-mentioned
+    entity pairs in this briefing. This lets agents see explicit graph structure
+    instead of only raw text.
+    """
+    try:
+        with driver.session() as session:
+            result = session.run(
+                """
+                MATCH (c:NewsChunk {graph_id: $gid, briefing_source: $briefing})<-[:MENTIONED_IN]-(a:Entity)
+                MATCH (c)<-[:MENTIONED_IN]-(b:Entity)
+                WHERE a.name_lower < b.name_lower
+                WITH a.name AS a_name, b.name AS b_name, count(c) AS shared_chunks
+                ORDER BY shared_chunks DESC, a_name, b_name
+                LIMIT $limit
+                RETURN a_name, b_name, shared_chunks
+                """,
+                gid=graph_id,
+                briefing=briefing_source,
+                limit=limit,
+            )
+            rows = [dict(r) for r in result]
+    except Exception as e:
+        logger.warning(f"Graph link context query failed: {e}")
+        return ""
+
+    if not rows:
+        return ""
+
+    lines = [
+        f"- {r['a_name']} <-> {r['b_name']} (co-mentioned in {int(r['shared_chunks'])} chunks)"
+        for r in rows
+    ]
+    return (
+        "Knowledge-graph links extracted from this briefing:\n"
+        + "\n".join(lines)
+        + "\nUse these links as structural context when forming your reaction."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Portfolio position helpers (TIER 2A)
 # ---------------------------------------------------------------------------
@@ -341,6 +384,16 @@ _ASSET_TICKERS   = {
     'fx':          'DX-Y.NYB',
     'real_estate': 'VNQ',
     'mixed':       'VT',
+}
+
+_ASSET_DISPLAY_NAMES = {
+    'equities': 'Equities',
+    'crypto': 'Crypto',
+    'bonds': 'Bonds',
+    'commodities': 'Commodities',
+    'fx': 'FX',
+    'real_estate': 'Real Estate',
+    'mixed': 'Mixed',
 }
 
 
@@ -624,13 +677,16 @@ def write_sentiment_snapshot(driver, graph_id: str, tick_reactions: list) -> Non
     )
 
 
-def write_memory_event(driver, agent_uuid: str, briefing_source: str, reaction_data: dict) -> None:
+def write_memory_event(driver, agent_uuid: str, graph_id: str, briefing_source: str, reaction_data: dict) -> None:
     """Create a :MemoryEvent node and link it to the agent.
 
     TIER 2B fields stored on every event:
       direction     — int (-1/0/+1); null on older events (use coalesce in Cypher)
       conviction    — float 0-1; null on older events
       position_size — float 0-1; null on older events
+
+        Also links the event to asset entities via :CONCERNS so the traversal path
+        agent -> memory event -> asset/entity is explicit in the graph.
     """
     event_uuid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
@@ -656,13 +712,39 @@ def write_memory_event(driver, agent_uuid: str, briefing_source: str, reaction_d
     except (TypeError, ValueError):
         position_size = 0.3
 
+    raw_assets = reaction_data.get('assets_mentioned', [])
+    if not isinstance(raw_assets, list):
+        raw_assets = []
+
+    clean_assets = []
+    for asset in raw_assets:
+        asset_s = str(asset).strip()
+        if asset_s:
+            clean_assets.append(asset_s)
+
+    seen_assets = set()
+    concern_payload = []
+    for asset in clean_assets:
+        asset_lower = asset.lower()
+        if asset_lower in seen_assets:
+            continue
+        seen_assets.add(asset_lower)
+
+        label = _ASSET_DISPLAY_NAMES.get(asset_lower, asset.replace('_', ' ').title())
+        concern_payload.append({
+            "name_lower": asset_lower,
+            "name": label,
+            "summary": f"{label} (AssetClass)",
+        })
+
     with driver.session() as session:
         def _write(tx):
             tx.run(
                 """
-                MATCH (n:Entity {uuid: $agent_uuid})
+                MATCH (n:Entity {uuid: $agent_uuid, graph_id: $gid})
                 CREATE (m:MemoryEvent {
                     uuid: $uuid,
+                    graph_id: $gid,
                     agent_uuid: $agent_uuid,
                     timestamp: $ts,
                     briefing_source: $src,
@@ -675,15 +757,35 @@ def write_memory_event(driver, agent_uuid: str, briefing_source: str, reaction_d
                     position_size: $position_size
                 })
                 CREATE (n)-[:HAS_MEMORY]->(m)
+                WITH m
+                UNWIND $concerns AS concern
+                WITH m, concern
+                WHERE concern.name_lower <> ''
+                MERGE (e:Entity {graph_id: $gid, name_lower: concern.name_lower})
+                ON CREATE SET
+                    e.uuid = randomUUID(),
+                    e.name = concern.name,
+                    e.type = 'AssetClass',
+                    e.summary = concern.summary,
+                    e.created_at = $ts,
+                    e.last_seen = datetime(),
+                    e.is_synthetic = false,
+                    e.central_bank_source = false,
+                    e.mention_count = 0
+                ON MATCH SET
+                    e.last_seen = CASE WHEN e.is_synthetic THEN e.last_seen ELSE datetime() END
+                MERGE (m)-[:CONCERNS]->(e)
                 """,
                 agent_uuid=agent_uuid,
+                gid=graph_id,
                 uuid=event_uuid,
                 ts=now,
                 src=briefing_source,
                 reaction=reaction_data.get('reaction', 'hold'),
                 confidence=float(reaction_data.get('confidence', 5.0)),
                 reasoning=str(reaction_data.get('reasoning', '')),
-                assets=json.dumps(reaction_data.get('assets_mentioned', [])),
+                assets=json.dumps(clean_assets),
+                concerns=concern_payload,
                 direction=direction,
                 conviction=conviction,
                 position_size=position_size,
@@ -798,7 +900,8 @@ def _leverage_prose(value) -> Optional[str]:
 
 
 def build_prompt(agent: dict, memory_events: list, context_chunks: list,
-                 positions_block: str = '', contagion_context: str = '') -> list:
+                 positions_block: str = '', graph_links_block: str = '',
+                 contagion_context: str = '') -> list:
     """
     Build messages list for LLMClient.chat_json().
 
@@ -903,6 +1006,8 @@ def build_prompt(agent: dict, memory_events: list, context_chunks: list,
         system_parts.append(memory_block)
     if positions_block:
         system_parts.append(positions_block)
+    if graph_links_block:
+        system_parts.append(graph_links_block)
     if contagion_context:
         system_parts.append(contagion_context)
 
@@ -946,13 +1051,15 @@ def build_prompt(agent: dict, memory_events: list, context_chunks: list,
 
 
 def call_llm_for_agent(llm: LLMClient, agent: dict, memory: list, chunks: list,
-                       positions_block: str = '', contagion_context: str = '') -> Optional[dict]:
+                       positions_block: str = '', graph_links_block: str = '',
+                       contagion_context: str = '') -> Optional[dict]:
     """Returns validated reaction dict, or None on failure.
 
     TIER 2B: parses direction, conviction, position_size from LLM response.
     Missing or invalid fields fall back to safe defaults (logged at DEBUG).
     """
     messages = build_prompt(agent, memory, chunks, positions_block=positions_block,
+                            graph_links_block=graph_links_block,
                             contagion_context=contagion_context)
     try:
         result = llm.chat_json(messages, temperature=0.7, max_tokens=512)
@@ -1113,6 +1220,10 @@ def run_tick(driver, graph_id: str, briefing_path: str, full: bool = False,
     agents = [a for a in agents if a['uuid'] not in already_processed]
     print(f"Resuming: {len(already_processed)} already processed, {len(agents)} remaining")
 
+    graph_links_block = load_briefing_link_context(driver, graph_id, briefing_source)
+    if graph_links_block:
+        logger.info("Graph link context loaded for prompt injection")
+
     processed_ids = list(already_processed)
     errors = 0
     # Accumulate reaction data for the SentimentSnapshot written after the loop
@@ -1185,6 +1296,7 @@ def run_tick(driver, graph_id: str, briefing_path: str, full: bool = False,
         # LLM reaction (with position context injected)
         reaction = call_llm_for_agent(llm, agent, memory, relevant_chunks,
                                       positions_block=positions_block,
+                                      graph_links_block=graph_links_block,
                                       contagion_context=agent_contagion)
         if reaction is None:
             errors += 1
@@ -1192,7 +1304,7 @@ def run_tick(driver, graph_id: str, briefing_path: str, full: bool = False,
 
         write_success = True
         try:
-            write_memory_event(driver, agent['uuid'], briefing_source, reaction)
+            write_memory_event(driver, agent['uuid'], graph_id, briefing_source, reaction)
         except Exception as e:
             logger.warning(f"Memory write failed for {agent['uuid']}: {e} — agent will be retried on resume")
             errors += 1

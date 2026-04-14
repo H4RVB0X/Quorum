@@ -1,18 +1,14 @@
 [
   {
     "source": "Yahoo Finance",
-    "count": 15
+    "count": 16
   },
   {
     "source": "Seeking Alpha",
-    "count": 7
+    "count": 6
   },
   {
     "source": "MarketWatch",
-    "count": 3
-  },
-  {
-    "source": "FT Markets",
     "count": 2
   }
 ]
