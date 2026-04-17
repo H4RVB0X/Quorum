@@ -12,28 +12,28 @@
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:      #060c18;
-  --panel:   #0a1220;
-  --panel2:  #0e1828;
-  --raised:  #121f32;
-  --line:    #1a2d47;
-  --line2:   #243c5c;
+  --bg:      #020810;
+  --panel:   #060f1b;
+  --panel2:  #091422;
+  --raised:  #0d1c30;
+  --line:    #162538;
+  --line2:   #1e3250;
   --green:   #00e676;
   --green-d: #00a152;
   --green-bg:#001a0e;
   --red:     #ff5252;
   --red-d:   #c62828;
-  --red-bg:  #1a0000;
+  --red-bg:  #1c0000;
   --amber:   #ffd740;
   --amber-d: #ff8f00;
   --amber-bg:#1a1200;
-  --blue:    #448aff;
-  --blue-bg: #001040;
-  --purple:  #e040fb;
-  --cyan:    #18ffff;
-  --text:    #e8eaf0;
-  --text2:   #a0aec0;
-  --dim:     #546580;
+  --blue:    #4a8af4;
+  --blue-bg: #050f3a;
+  --purple:  #d946ef;
+  --cyan:    #22d3ee;
+  --text:    #f1f5f9;
+  --text2:   #94a3b8;
+  --dim:     #4a5d75;
   --mono:    'IBM Plex Mono',monospace;
   --ui:      'Inter',sans-serif;
 }
@@ -47,8 +47,9 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
   position:sticky;top:0;z-index:200;
   display:flex;align-items:center;gap:16px;
   padding:0 20px;height:46px;
-  background:rgba(6,12,24,.97);
+  background:rgba(2,8,16,.98);
   border-bottom:1px solid var(--line);
+  box-shadow:0 1px 24px rgba(0,0,0,.5);
 }
 .hdr-logo{
   font-family:var(--mono);font-size:12px;font-weight:600;
@@ -123,12 +124,12 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
   flex:1;min-width:130px;
   padding:12px 14px;
   background:var(--panel);
-  cursor:pointer;transition:background .15s;
-  border-top:2px solid transparent;
+  cursor:pointer;transition:background .2s,box-shadow .2s;
+  border-top:3px solid transparent;
 }
 .stile:hover{background:var(--raised)}
-.stile.bull{border-top-color:var(--green)}
-.stile.bear{border-top-color:var(--red)}
+.stile.bull{border-top-color:var(--green);box-shadow:inset 0 0 20px rgba(0,230,118,.04)}
+.stile.bear{border-top-color:var(--red);box-shadow:inset 0 0 20px rgba(255,82,82,.04)}
 .stile.neut{border-top-color:var(--line2)}
 .st-label{
   font-family:var(--mono);font-size:9px;
@@ -224,7 +225,7 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
 #sidebar::-webkit-scrollbar{width:4px}
 #sidebar::-webkit-scrollbar-track{background:transparent}
 #sidebar::-webkit-scrollbar-thumb{background:var(--line)}
-.side-sec{border-bottom:1px solid var(--line);padding:14px 16px}
+.side-sec{border-bottom:1px solid var(--line);padding:16px}
 .side-title{
   font-family:var(--mono);font-size:9px;font-weight:600;
   text-transform:uppercase;letter-spacing:.15em;
@@ -233,27 +234,19 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
 
 /* Stat pairs in sidebar */
 .stat-pair{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
-.stat-item{padding:8px 10px;background:var(--raised);border-radius:4px}
+.stat-item{padding:10px 12px;background:var(--raised);border-radius:4px;border:1px solid var(--line)}
 .stat-n{
-  font-family:var(--mono);font-size:20px;font-weight:600;
+  font-family:var(--mono);font-size:24px;font-weight:600;
   color:var(--text);line-height:1.1;
 }
 .stat-n.grn{color:var(--green)}
 .stat-l{font-family:var(--mono);font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.1em;margin-top:2px}
 
-/* Fear/greed in sidebar */
-.fg-track{
-  height:6px;border-radius:3px;margin:8px 0 4px;
-  background:linear-gradient(to right,var(--blue),var(--amber),var(--red));
-  position:relative;
-}
-.fg-needle{
-  position:absolute;top:-5px;width:2px;height:16px;
-  background:var(--text);border-radius:1px;
-  transform:translateX(-50%);
-  transition:left .5s cubic-bezier(.34,1.56,.64,1);
-}
-.fg-nums{display:flex;justify-content:space-between;margin-top:6px}
+/* Fear/greed arc gauge */
+.fg-gauge{text-align:center}
+.fg-gauge svg{display:block;width:100%;height:auto}
+#fg-ndl{transition:x2 .5s cubic-bezier(.34,1.56,.64,1),y2 .5s cubic-bezier(.34,1.56,.64,1)}
+.fg-vals{display:flex;justify-content:space-between;align-items:flex-start;margin-top:-6px;padding:0 4px}
 .fg-val{font-family:var(--mono);font-size:14px;font-weight:600}
 .fg-sub{font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:1px}
 .sparkline-wrap{height:36px;position:relative;margin-top:8px}
@@ -334,7 +327,7 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
 
 /* Distributions 2×2 */
 .dist-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.dist-card{background:var(--panel2);border-radius:4px;padding:12px}
+.dist-card{background:var(--panel2);border-radius:4px;padding:12px;border:1px solid var(--line);box-shadow:0 2px 12px rgba(0,0,0,.35)}
 .dist-title{font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:var(--dim);margin-bottom:8px}
 
 /* Memory feed table */
@@ -445,10 +438,10 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
 }
 #drilldown-overlay.on{display:flex}
 #drilldown-modal{
-  background:var(--panel);border:1px solid var(--line2);border-radius:6px;
+  background:var(--panel);border:1px solid var(--line2);border-radius:10px;
   width:min(920px,96vw);max-height:82vh;overflow:hidden;
   display:flex;flex-direction:column;flex-shrink:0;
-  box-shadow:0 8px 40px rgba(0,0,0,.6);
+  box-shadow:0 20px 70px rgba(0,0,0,.75);
 }
 .dd-header{
   display:flex;align-items:center;gap:12px;
@@ -504,7 +497,7 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
 
 <!-- ═══ ALERT STRIP ═══ -->
 <div id="alert-strip" role="alert" aria-live="polite">
-  <span class="alert-lbl">⚠ alerts</span>
+  <span class="alert-lbl"><svg style="width:9px;height:9px;fill:var(--amber);vertical-align:middle;margin-right:3px;margin-bottom:1px" viewBox="0 0 16 16"><path d="M7.3 1.6L.2 14h15.6L8.7 1.6a.8.8 0 0 0-1.4 0zm.7 4.4h1v4H8V6zm0 5h1v1.5H8V11z"/></svg>ALERTS</span>
 </div>
 
 <!-- ═══ SIGNAL STRIP ═══ -->
@@ -574,17 +567,29 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
 
     <div class="side-sec">
       <div class="side-title">Fear / Greed</div>
-      <div class="fg-track">
-        <div class="fg-needle" id="fg-needle" style="left:50%"></div>
-      </div>
-      <div class="fg-nums">
-        <div>
-          <div class="fg-val" id="fg-fear" style="color:var(--blue)">—</div>
-          <div class="fg-sub">fear</div>
-        </div>
-        <div style="text-align:right">
-          <div class="fg-val" id="fg-greed" style="color:var(--amber)">—</div>
-          <div class="fg-sub">greed</div>
+      <div class="fg-gauge">
+        <svg viewBox="0 0 200 108" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Fear greed gauge">
+          <!-- track -->
+          <path d="M15,100 A85,85 0 0,1 185,100" stroke="#0d1c30" stroke-width="12" stroke-linecap="round"/>
+          <!-- fear zone -->
+          <path d="M15,100 A85,85 0 0,1 57,27"   stroke="#4a8af4" stroke-width="12" stroke-linecap="round" opacity="0.55"/>
+          <!-- neutral zone -->
+          <path d="M57,27 A85,85 0 0,1 143,27"   stroke="#4a5d75" stroke-width="12" opacity="0.45"/>
+          <!-- greed zone -->
+          <path d="M143,27 A85,85 0 0,1 185,100" stroke="#ffd740" stroke-width="12" stroke-linecap="round" opacity="0.55"/>
+          <!-- needle -->
+          <line id="fg-ndl" x1="100" y1="100" x2="100" y2="20" stroke="#f1f5f9" stroke-width="2.5" stroke-linecap="round"/>
+          <circle cx="100" cy="100" r="5" fill="#091422" stroke="#f1f5f9" stroke-width="2"/>
+        </svg>
+        <div class="fg-vals">
+          <div>
+            <div class="fg-val" id="fg-fear" style="color:var(--blue)">—</div>
+            <div class="fg-sub">fear</div>
+          </div>
+          <div style="text-align:right">
+            <div class="fg-val" id="fg-greed" style="color:var(--amber)">—</div>
+            <div class="fg-sub">greed</div>
+          </div>
         </div>
       </div>
       <div style="font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:10px">48-tick trend</div>
@@ -760,10 +765,10 @@ let _marketOpen    = true;   // updated by fetchLiveState; true by default (assu
 let _lastSentimentData = null; // cached /api/investors/sentiment response for toggle (CHANGE 6)
 
 const ARCH_COLORS = {
-  retail_amateur:'#00e676', retail_experienced:'#448aff', prop_trader:'#ffd740',
-  fund_manager:'#ff7043', family_office:'#40c4ff', hedge_fund:'#ff9100', pension_fund:'#e040fb',
+  retail_amateur:'#00e676', retail_experienced:'#4a8af4', prop_trader:'#ffd740',
+  fund_manager:'#ff7043', family_office:'#40c4ff', hedge_fund:'#ff9100', pension_fund:'#d946ef',
 };
-const STRAT_COLORS = ['#00e676','#448aff','#ffd740','#ff7043','#40c4ff','#ff9100','#e040fb','#69f0ae','#80d8ff','#ffff00'];
+const STRAT_COLORS = ['#00e676','#4a8af4','#ffd740','#ff7043','#40c4ff','#ff9100','#d946ef','#69f0ae','#80d8ff','#c084fc'];
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function fmtCap(v){
@@ -797,8 +802,8 @@ function rxClass(r){
 // ── Chart init ────────────────────────────────────────────────────────────────
 function initCharts(){
   const M="'IBM Plex Mono'";
-  const gc='rgba(26,45,71,.6)';
-  const tc='#546580';
+  const gc='rgba(18,37,60,.7)';
+  const tc='#4a5d75';
 
   const base={
     responsive:true,maintainAspectRatio:false,
@@ -821,20 +826,20 @@ function initCharts(){
   });
   stratChart=new Chart(document.getElementById('stratChart'),{
     type:'bar',
-    data:{labels:[],datasets:[{data:[],backgroundColor:'#448aff',borderRadius:2}]},
+    data:{labels:[],datasets:[{data:[],backgroundColor:'#4a8af4',borderRadius:2}]},
     options:{...base,indexAxis:'y',scales:{x:{ticks:{color:tc,font:{family:M,size:8}},grid:{color:gc}},y:{ticks:{color:tc,font:{family:M,size:8}},grid:{display:false}}}}
   });
   biasChart=new Chart(document.getElementById('biasChart'),{
     type:'bar',
-    data:{labels:[],datasets:[{data:[],backgroundColor:'#e040fb',borderRadius:2}]},
+    data:{labels:[],datasets:[{data:[],backgroundColor:'#d946ef',borderRadius:2}]},
     options:{...base,scales:{x:{ticks:{color:tc,font:{family:M,size:8}},grid:{color:gc}},y:{ticks:{color:tc,font:{family:M,size:8}},grid:{color:gc}}}}
   });
 
   historyChart=new Chart(document.getElementById('historyChart'),{
     type:'line',
     data:{labels:[],datasets:[
-      {label:'Sentiment',data:[],borderColor:'#00e676',backgroundColor:'rgba(0,230,118,.05)',pointRadius:3,tension:.3,yAxisID:'y',spanGaps:false},
-      {label:'Price Δ%',data:[],borderColor:'#448aff',backgroundColor:'rgba(68,138,255,.05)',pointRadius:3,tension:.3,yAxisID:'y1',borderDash:[4,3],spanGaps:false}
+      {label:'Sentiment',data:[],borderColor:'#00e676',backgroundColor:'rgba(0,230,118,.10)',fill:'origin',pointRadius:2,borderWidth:1.5,tension:.3,yAxisID:'y',spanGaps:false},
+      {label:'Price Δ%',data:[],borderColor:'#4a8af4',backgroundColor:'rgba(74,138,244,.08)',fill:'origin',pointRadius:2,borderWidth:1.5,tension:.3,yAxisID:'y1',borderDash:[4,3],spanGaps:false}
     ]},
     options:{
       responsive:true,maintainAspectRatio:false,
@@ -846,12 +851,12 @@ function initCharts(){
       scales:{
         x:{ticks:{color:tc,font:{family:M,size:8}},grid:{color:gc}},
         y:{ticks:{color:'#00e676',font:{family:M,size:9}},grid:{color:gc},title:{display:true,text:'Sentiment',color:'#00e676',font:{family:M,size:8}}},
-        y1:{position:'right',ticks:{color:'#448aff',font:{family:M,size:9}},grid:{display:false},title:{display:true,text:'Price Δ%',color:'#448aff',font:{family:M,size:8}}}
+        y1:{position:'right',ticks:{color:'#4a8af4',font:{family:M,size:9}},grid:{display:false},title:{display:true,text:'Price Δ%',color:'#4a8af4',font:{family:M,size:8}}}
       }
     }
   });
 
-  const ASSET_COLORS={equities:'#00e676',crypto:'#ffd740',bonds:'#448aff',commodities:'#ff9100',fx:'#40c4ff',real_estate:'#e040fb',mixed:'#546580'};
+  const ASSET_COLORS={equities:'#00e676',crypto:'#ffd740',bonds:'#4a8af4',commodities:'#ff9100',fx:'#40c4ff',real_estate:'#d946ef',mixed:'#4a5d75'};
   const ASSETS=['equities','crypto','bonds','commodities','fx','real_estate','mixed'];
 
   tickSentChart=new Chart(document.getElementById('tickSentChart'),{
@@ -861,7 +866,7 @@ function initCharts(){
       datasets:ASSETS.map(a=>({
         label:a.replace(/_/g,' '),data:[],
         borderColor:ASSET_COLORS[a],backgroundColor:'transparent',
-        pointRadius:2,borderWidth:1.5,tension:.3,
+        pointRadius:2,borderWidth:1.5,tension:.3,fill:false,
       }))
     },
     options:{
@@ -913,7 +918,7 @@ function initCharts(){
 
   feedChart=new Chart(document.getElementById('feedChart'),{
     type:'bar',
-    data:{labels:[],datasets:[{data:[],backgroundColor:'#448aff',borderRadius:2}]},
+    data:{labels:[],datasets:[{data:[],backgroundColor:'#4a8af4',borderRadius:2}]},
     options:{
       responsive:true,maintainAspectRatio:false,indexAxis:'y',
       plugins:{legend:{display:false}},
@@ -948,9 +953,9 @@ function renderSignals(sigs){
     // Regime contra — signal diverges from overall market trend
     let contraHtml='';
     if((regimeTrend==='BEAR_TRENDING'&&sig==='bullish')||(regimeTrend==='BULL_TRENDING'&&sig==='bearish')){
-      contraHtml='<div class="st-contra">⚡ REGIME CONTRA</div>';
+      contraHtml='<div class="st-contra">▲ REGIME CONTRA</div>';
     }
-    const warnHtml=warnFear?'<span class="st-warn">⚠ </span>':'';
+    const warnHtml=warnFear?'<span class="st-warn">! </span>':'';
     // Market closed badge — grey out non-crypto assets outside US market hours
     const isCrypto=s.asset==='crypto';
     const closedBadge=(!_marketOpen&&!isCrypto)?'<div style="font-family:var(--mono);font-size:8px;color:var(--dim);margin-top:3px;letter-spacing:.5px">MARKET CLOSED</div>':'';
@@ -1036,7 +1041,12 @@ function updateFG(fgData){
   const gPct=gp?Math.round(gp.count/tot*100):0;
   document.getElementById('fg-fear').textContent=fPct+'%';
   document.getElementById('fg-greed').textContent=gPct+'%';
-  document.getElementById('fg-needle').style.left=gPct+'%';
+  const ndl=document.getElementById('fg-ndl');
+  if(ndl){
+    const a=(gPct/100*Math.PI)-Math.PI/2;
+    ndl.setAttribute('x2',(100+80*Math.sin(a)).toFixed(1));
+    ndl.setAttribute('y2',(100-80*Math.cos(a)).toFixed(1));
+  }
 }
 
 function updateEvents(events,total){
@@ -1540,13 +1550,13 @@ function renderCorrelationMatrix(matrix){
     if(v>=0.7)return'#ff5252';     // strong positive — red
     if(v>=0.3)return'#ffd740';     // moderate positive — amber
     if(v>=-0.3)return'#00e676';    // weak/none — green
-    return'#448aff';               // negative — blue
+    return'#4a8af4';               // negative — blue
   };
   const cellBg=v=>{
     if(v>=0.7)return'rgba(255,82,82,.18)';
     if(v>=0.3)return'rgba(255,215,64,.12)';
     if(v>=-0.3)return'rgba(0,230,118,.08)';
-    return'rgba(68,138,255,.14)';
+    return'rgba(74,138,244,.14)';
   };
   const header=`<th style="font-family:var(--mono);font-size:8px;color:var(--dim);padding:3px"></th>`+
     assets.map(a=>`<th style="font-family:var(--mono);font-size:8px;color:var(--dim);padding:3px;white-space:nowrap">${a.replace(/_/g,' ')}</th>`).join('');

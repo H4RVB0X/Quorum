@@ -1,7 +1,7 @@
 {
-  "last_news_fetch": "2026-04-17T00:32:18.712979+00:00",
-  "last_tick": "2026-04-17T00:28:09.893361+00:00",
-  "last_full_simulation": null,
+  "last_news_fetch": "2026-04-17T17:32:42.409921+00:00",
+  "last_tick": "2026-04-17T18:01:55.515965+00:00",
+  "last_full_simulation": "2026-04-17T12:41:08.135996+00:00",
   "current_agent_pool_size": 8192,
   "last_error": null
 }

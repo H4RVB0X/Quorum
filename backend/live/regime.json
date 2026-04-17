@@ -3,10 +3,10 @@
   "trend": "INSUFFICIENT_DATA",
   "yield_curve": "STABLE",
   "fear": "COMPLACENT",
-  "annualised_vol_pct": 12.0,
+  "annualised_vol_pct": 11.9,
   "vix": null,
   "yield_spread_pct": null,
-  "computed_at": "2026-04-17T00:32:00.060159+00:00",
+  "computed_at": "2026-04-17T18:02:00.040641+00:00",
   "data_sources": [
     "price_history",
     "fallback_tlt_spy"
