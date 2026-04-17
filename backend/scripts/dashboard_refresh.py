@@ -70,6 +70,10 @@ _HISTORY_MAX_POINTS = 2880   # 30 days × 96 points/day at 15-min cadence
 # Ensure the live/ directory exists (first run before docker-compose creates the mount point)
 _LIVE_DIR.mkdir(parents=True, exist_ok=True)
 
+# US equity market hours in UTC (Mon–Fri 09:30–16:00 EST = 13:30–20:00 UTC)
+# Crypto is 24/7 — this constant refers to equity/bond/ETF markets only.
+MARKET_OPEN_UTC = {"start_hour": 13, "start_min": 30, "end_hour": 20, "end_min": 0}
+
 _ASSET_CLASSES = ["equities", "crypto", "bonds", "commodities", "fx", "real_estate", "mixed"]
 
 ASSET_TICKERS = {
@@ -191,6 +195,44 @@ def _signal(score: float) -> str:
     if score < -0.4:
         return "bearish"
     return "neutral"
+
+
+# ---------------------------------------------------------------------------
+# Market open indicator
+# ---------------------------------------------------------------------------
+
+def is_market_open(now: datetime | None = None) -> bool:
+    """Return True if US equity markets are currently open (Mon–Fri 13:30–20:00 UTC)."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    # Weekends: Mon=0 … Fri=4, Sat=5, Sun=6
+    if now.weekday() >= 5:
+        return False
+    open_minutes  = MARKET_OPEN_UTC["start_hour"] * 60 + MARKET_OPEN_UTC["start_min"]
+    close_minutes = MARKET_OPEN_UTC["end_hour"]   * 60 + MARKET_OPEN_UTC["end_min"]
+    current_minutes = now.hour * 60 + now.minute
+    return open_minutes <= current_minutes < close_minutes
+
+
+# ---------------------------------------------------------------------------
+# Price staleness helper
+# ---------------------------------------------------------------------------
+
+def _compute_price_staleness_hours() -> float | None:
+    """Return hours since the most recent price file was written, or None if no files."""
+    if not _PRICES_DIR.is_dir():
+        return None
+    files = sorted(_PRICES_DIR.glob("????-??-??.json"), reverse=True)
+    if not files:
+        return None
+    try:
+        file_date = files[0].stem  # YYYY-MM-DD
+        # Price files are written once per day; treat file date as noon UTC
+        file_dt = datetime.fromisoformat(file_date + "T12:00:00").replace(tzinfo=timezone.utc)
+        delta_h = (datetime.now(timezone.utc) - file_dt).total_seconds() / 3600
+        return round(max(0.0, delta_h), 2)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +366,10 @@ _SENTIMENT_QUERY = """
 def refresh(graph_id: str) -> None:
     logger.info("Starting refresh")
     now   = datetime.now(timezone.utc)
-    state: dict = {"refreshed_at": now.isoformat()}
+    state: dict = {
+        "refreshed_at": now.isoformat(),
+        "market_open":  is_market_open(now),
+    }
 
     # ------------------------------------------------------------------
     # 1. Prices (independent of Neo4j — always attempted)
@@ -354,12 +399,20 @@ def refresh(graph_id: str) -> None:
                 price_changes_24h[asset] = round((p - pp) / pp * 100, 4)
         state["price_changes_24h"] = price_changes_24h
 
+        # Price staleness (how old the latest price file is)
+        staleness = _compute_price_staleness_hours()
+        if staleness is not None:
+            state["price_staleness_hours"] = staleness
+
     except Exception as e:
         logger.warning(f"Price section error: {e}")
         fallback, _ = _latest_price_file()
         state["prices"]          = {a: fallback.get(a) for a in _ASSET_CLASSES}
         state["prices_stale"]    = True
         state["price_changes_24h"] = price_changes_24h
+        staleness = _compute_price_staleness_hours()
+        if staleness is not None:
+            state["price_staleness_hours"] = staleness
 
     # ------------------------------------------------------------------
     # 2. Neo4j sections
@@ -471,8 +524,40 @@ def refresh(graph_id: str) -> None:
                     }
                 if drawdowns:
                     state["drawdowns"] = drawdowns
+
+            # Correlation matrix — Pearson from same 48-snapshot window (CHANGE 7)
+            if len(snap_rows) >= 10:
+                import math
+                asset_series = {}
+                for asset in _ASSET_CLASSES:
+                    vals = [r.get(asset) for r in snap_rows if r.get(asset) is not None]
+                    if len(vals) >= 10:
+                        asset_series[asset] = vals
+
+                def _pearson(x: list, y: list) -> float:
+                    n = min(len(x), len(y))
+                    if n < 2:
+                        return 0.0
+                    x, y = x[:n], y[:n]
+                    mx, my = sum(x)/n, sum(y)/n
+                    num = sum((x[i]-mx)*(y[i]-my) for i in range(n))
+                    dx  = math.sqrt(sum((v-mx)**2 for v in x))
+                    dy  = math.sqrt(sum((v-my)**2 for v in y))
+                    if dx == 0 or dy == 0:
+                        return 0.0
+                    return round(num / (dx * dy), 4)
+
+                assets_with_data = list(asset_series.keys())
+                if len(assets_with_data) >= 2:
+                    matrix = {}
+                    for a in assets_with_data:
+                        matrix[a] = {}
+                        for b in assets_with_data:
+                            matrix[a][b] = 1.0 if a == b else _pearson(asset_series[a], asset_series[b])
+                    state["correlation_matrix"] = matrix
+
         except Exception as e:
-            logger.warning(f"Drawdown computation failed: {e}")
+            logger.warning(f"Drawdown/correlation computation failed: {e}")
 
         # -- 2d. Signals (derived from sentiment + prices, no extra DB call) --
         try:
@@ -577,6 +662,47 @@ def refresh(graph_id: str) -> None:
         except Exception as e:
             logger.warning(f"Pool stats query failed: {e}")
 
+        # -- 2h. Source bias — per-source reaction distribution over last 7 days (CHANGE 4 Item 3) --
+        try:
+            ts_7d = (now - timedelta(days=7)).isoformat()
+            with driver.session() as session:
+                bias_rows = session.run(
+                    """
+                    MATCH (a:Entity {graph_id: $gid, is_synthetic: true})-[:HAS_MEMORY]->(m:MemoryEvent)
+                    WHERE m.timestamp >= $since AND m.briefing_source IS NOT NULL
+                    RETURN m.briefing_source AS source,
+                           m.reaction        AS reaction,
+                           count(m)          AS cnt
+                    ORDER BY source, reaction
+                    """,
+                    gid=graph_id,
+                    since=ts_7d,
+                ).data()
+            if bias_rows:
+                source_totals: dict = {}
+                source_reactions: dict = {}
+                for r in bias_rows:
+                    src = r["source"]
+                    rxn = r["reaction"]
+                    cnt = int(r["cnt"] or 0)
+                    source_totals[src] = source_totals.get(src, 0) + cnt
+                    if src not in source_reactions:
+                        source_reactions[src] = {}
+                    source_reactions[src][rxn] = cnt
+                source_bias = {}
+                for src, total in source_totals.items():
+                    if total == 0:
+                        continue
+                    source_bias[src] = {
+                        rxn: round(cnt / total * 100, 1)
+                        for rxn, cnt in source_reactions[src].items()
+                    }
+                    source_bias[src]["total_events"] = total
+                if source_bias:
+                    state["source_bias"] = source_bias
+        except Exception as e:
+            logger.warning(f"Source bias query failed: {e}")
+
     finally:
         try:
             driver.close()
@@ -590,9 +716,10 @@ def refresh(graph_id: str) -> None:
         if _BRIEFINGS_DIR.is_dir():
             sidecars = sorted(_BRIEFINGS_DIR.glob("*_sources.json"), reverse=True)
             if sidecars:
-                state["feed_breakdown"] = json.loads(
-                    sidecars[0].read_text(encoding="utf-8")
-                )
+                raw = json.loads(sidecars[0].read_text(encoding="utf-8"))
+                # New sidecar format: {"sources": [...], "reddit": {...}, ...}
+                # Legacy: plain list
+                state["feed_breakdown"] = raw.get("sources", raw) if isinstance(raw, dict) else raw
     except Exception as e:
         logger.warning(f"Feed breakdown read failed: {e}")
 

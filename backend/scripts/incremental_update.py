@@ -95,6 +95,63 @@ ENTITY_REMOVE_LIST: set = {
     "VIX", "USD", "EUR", "GBP", "JPY", "BTC", "ETH",
 }
 
+# ---------------------------------------------------------------------------
+# Entity name normalisation (CHANGE 5)
+# Maps common variant forms to canonical names before Neo4j writes.
+# Applied in extract_entities_spacy() before any other processing.
+# ---------------------------------------------------------------------------
+
+ENTITY_ALIASES: Dict[str, str] = {
+    # Federal Reserve variants
+    "Fed":                       "Federal Reserve",
+    "the Fed":                   "Federal Reserve",
+    "US Fed":                    "Federal Reserve",
+    "U.S. Fed":                  "Federal Reserve",
+    "FED":                       "Federal Reserve",
+    "Fed Reserve":               "Federal Reserve",
+    # Other central banks
+    "ECB":                       "European Central Bank",
+    "BoE":                       "Bank of England",
+    "BoJ":                       "Bank of Japan",
+    # US investment banks
+    "Goldman":                   "Goldman Sachs",
+    "GS":                        "Goldman Sachs",
+    "JPM":                       "JPMorgan Chase",
+    "JP Morgan":                 "JPMorgan Chase",
+    "BofA":                      "Bank of America",
+    "MS":                        "Morgan Stanley",
+    "Citi":                      "Citigroup",
+    # Crypto
+    "BTC":                       "Bitcoin",
+    "ETH":                       "Ethereum",
+    # Tech companies
+    "Nvidia":                    "NVIDIA",
+    "Apple Inc":                 "Apple",
+    "Meta Platforms":            "Meta",
+    "Alphabet Inc":              "Alphabet",
+    "Amazon.com":                "Amazon",
+    # Political figures
+    "Trump":                     "Donald Trump",
+    "Biden":                     "Joe Biden",
+    "Powell":                    "Jerome Powell",
+    "Yellen":                    "Janet Yellen",
+    "Lagarde":                   "Christine Lagarde",
+    # International organisations
+    "IMF":                       "International Monetary Fund",
+    "WTO":                       "World Trade Organization",
+    "SEC":                       "Securities and Exchange Commission",
+    "CFTC":                      "Commodity Futures Trading Commission",
+}
+
+
+def normalise_entity_name(name: str) -> str:
+    stripped   = name.strip()
+    canonical  = ENTITY_ALIASES.get(stripped, stripped)
+    if canonical != stripped:
+        logger.debug(f"Entity normalised: {stripped} -> {canonical}")
+    return canonical
+
+
 # Neo4j UNWIND batch size — keeps payload under Neo4j's recommended limits
 BATCH_SIZE = 500
 
@@ -256,12 +313,15 @@ def extract_entities_spacy(
             continue
 
         name = ent.text.strip()
+        # CHANGE 5: normalise to canonical form before any other checks
+        name = normalise_entity_name(name)
+
         if len(name) < 3:
             continue
         if name.isnumeric():
             continue
 
-        # Drop noise acronyms, metrics, tickers, and FX codes
+        # Drop noise acronyms, metrics, tickers, and FX codes (after normalisation)
         if name in ENTITY_REMOVE_LIST:
             continue
 

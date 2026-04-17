@@ -2,7 +2,7 @@
 
 ## Current State
 
-The autonomous pipeline is fully functional. Every 30 minutes: fetch news → NER extract entities → sample 500 agents (stratified, min 5 per archetype), run per-agent LLM reaction tick with time-horizon gating → write SentimentSnapshot to Neo4j. Daily at 20:00 UTC: full 8,192-agent tick (~10 hours). Live dashboard shows trading signals, sentiment per asset class, agent reaction distribution, fear/greed, recent events, agent pool stats.
+The autonomous pipeline is fully functional. Every 30 minutes: fetch news → NER extract entities → sample 500 agents (stratified, min 5 per archetype), run per-agent LLM reaction tick with time-horizon gating → write SentimentSnapshot to Neo4j. Daily at 02:00 UTC: full 8,192-agent tick (~10 hours). Live dashboard shows trading signals, sentiment per asset class, agent reaction distribution, fear/greed, recent events, agent pool stats, cross-asset correlation matrix, source bias, market open indicator.
 
 Infrastructure status:
 - ✅ 8,192 agents with 16-trait taxonomy, archetype-conditional
@@ -27,7 +27,25 @@ Infrastructure status:
 - ✅ **Archetype signal decomposition** (TIER 2C-iii — 2026-04-14, /api/signals/archetype_split)
 - ✅ **Panic contagion injection** (TIER 2D-i — 2026-04-14, contagion_flag.txt + herd gate)
 - ✅ **Macro regime detection** (TIER 3 — 2026-04-14, price_fetcher + live/regime.json)
-- ❌ **Cross-asset correlation warnings**
+- ✅ **Daily scheduler moved to 02:00 UTC** (2026-04-16)
+- ✅ **Market open/closed indicator** (2026-04-16, live_state.json + dashboard badges)
+- ✅ **historyChart zoom/pan** (2026-04-16, Chart.js zoom plugin)
+- ✅ **Token budget enforcement** (2026-04-16, TOKEN_BUDGET=4096 in news_fetcher.py)
+- ✅ **price_staleness_hours in live_state** (2026-04-16, fast path in signals.py)
+- ✅ **Source bias panel** (2026-04-16, 7d MemoryEvent source distribution in sidebar)
+- ✅ **OpenBB VIX term structure** (2026-04-16, contango/backwardation/flat in regime.json)
+- ✅ **OpenBB institutional flow** (2026-04-16, IEF/HYG → risk_on/risk_off/neutral in regime.json)
+- ✅ **Economic + earnings calendar** (2026-04-16, backend/live/*.json + /api/live/calendar)
+- ✅ **Capital/equal-weighted toggle fixed** (2026-04-16, _lastSentimentData cache)
+- ✅ **Cross-asset correlation matrix** (2026-04-16, Pearson from 48 snapshots, heatmap panel)
+- ✅ **Non-ASCII language guard** (2026-04-16, retry with English re-prompt in simulation_tick.py)
+- ✅ **Nitter self-hosting documentation** (2026-04-16, Docker/compose guide in news_fetcher.py)
+- ✅ **Reddit JSON API integration** (2026-04-16, 6 subreddits, min_score/flair gates, cap 15 articles)
+- ✅ **Stocktwits integration** (2026-04-16, 7 symbols, follower gate, 5 msgs/symbol cap)
+- ✅ **Embedding cache persistence** (2026-04-16, sha256 key, atomic pickle, 10-file prune)
+- ✅ **Per-asset agent drilldown endpoint + modal** (2026-04-16, /api/signals/drilldown, dashboard modal)
+- ✅ **Entity alias deduplication** (2026-04-16, 32-entry ENTITY_ALIASES, normalise_entity_name())
+- ✅ **Token budget removed** (2026-04-16, unlimited briefing length)
 - ❌ **Herding/contagion modelling** (deep cascade — TIER 4A, requires 30 days data)
 - ❌ **Signal lag analysis** (leading vs coincident)
 
@@ -133,7 +151,7 @@ Prepend this to every briefing file header in `news_fetcher.py`.
 ### TIER 3B: DATA INTEGRITY
 
 - [ ] **News source sentiment bias tracking** — each RSS feed has a measurable lean (e.g. Zerohedge is structurally bearish; AP Business is neutral). Track per-source reaction distributions over time and apply a small bias correction in `compute_sentiment_scores()`.
-- [ ] **Briefing length normalisation with token budget cap** — long briefings dilute signal by filling the context window with less-relevant chunks. Add a token budget cap in `news_fetcher.py` (e.g. 4,096 tokens per briefing) and log when truncation occurs.
+- ~~**Briefing length normalisation with token budget cap**~~ — superseded; TOKEN_BUDGET removed (2026-04-16). qwen2.5:14b 32k context + chunking handles all briefing sizes naturally.
 - [ ] **`price_staleness_hours` propagation into signal API** — currently computed in `signals.py` at request time. Move into `live_state.json` via `dashboard_refresh.py` for consistency across endpoints and reduced per-request computation.
 
 ### TIER 4: AFTER 30 DAYS DATA (Backtesting maturity)
@@ -182,16 +200,16 @@ Most amateur sentiment models are coincident. If Quorum shows 55%+ accuracy at 6
 - [ ] Self-hosted Nitter in Docker (Twitter/social sentiment feeds via RSS)
 - [ ] WebSocket real-time updates to dashboard
 - [ ] Agent trait evolution via `agent_evolver.py` scaffolding (allow agents to update traits based on MemoryEvent performance)
-- [ ] Named entity deduplication post-NER ("Federal Reserve" / "Fed" → single entity)
+- ✅ **Named entity deduplication post-NER** — DONE (2026-04-16, ENTITY_ALIASES dict + normalise_entity_name() in incremental_update.py)
 - [ ] Entity relationship decay (time-weight relevance for entity connections)
 - [ ] Authentication + structured JSON logging
 - [ ] Neo4j memory tuning guide for SentimentSnapshot accumulation at 30-min cadence
-- [ ] **Embedding cache persistence to disk** — currently FAISS/numpy chunk cache is rebuilt from scratch every tick (~2–3 min for embedding). Persist to disk keyed by briefing hash to skip re-embedding unchanged briefings.
+- ✅ **Embedding cache persistence to disk** — DONE (2026-04-16, briefing_cache/ dir, sha256 key, atomic pickle, 10-file prune)
 - [ ] **Reaction diversity canary in scheduler_runs.json** — after the daily tick completes, run a condensed version of `verify_agent_diversity.py` check 8 and append `diversity_ok: bool` to the log entry. Visible signal if the pool collapses to unanimous reactions.
 
 **UX extensions:**
 - [ ] **Signal history CSV export endpoint** — `GET /api/signals/export?graph_id=...&days=30` returning a CSV for spreadsheet analysis.
-- [ ] **Per-asset agent drill-down on dashboard** — clicking a signal tile shows the top 20 agents driving that signal (archetype, capital, reaction, reasoning). Currently signals are fully opaque.
+- ✅ **Per-asset agent drill-down on dashboard** — DONE (2026-04-16, /api/signals/drilldown + modal with conviction bars, archetype badges, reasoning)
 - [ ] **Entity-level alert triggers** — mention spike alert when an entity's mention count in the current tick exceeds 2× its rolling 7-day average. More useful than the current absolute-threshold alert chip.
 
 ---

@@ -123,7 +123,7 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
   flex:1;min-width:130px;
   padding:12px 14px;
   background:var(--panel);
-  cursor:default;transition:background .15s;
+  cursor:pointer;transition:background .15s;
   border-top:2px solid transparent;
 }
 .stile:hover{background:var(--raised)}
@@ -433,6 +433,53 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
   border-radius:2px;background:var(--amber-bg);color:var(--amber);
   border:1px solid rgba(255,215,64,.2);display:none;margin-left:8px;
 }
+
+/* ═══════════════════════════════════════════
+   AGENT DRILLDOWN MODAL (CHANGE 4)
+═══════════════════════════════════════════ */
+#drilldown-overlay{
+  display:none;position:fixed;inset:0;z-index:500;
+  background:rgba(0,0,0,.75);
+  align-items:flex-start;justify-content:center;
+  padding-top:48px;overflow-y:auto;
+}
+#drilldown-overlay.on{display:flex}
+#drilldown-modal{
+  background:var(--panel);border:1px solid var(--line2);border-radius:6px;
+  width:min(920px,96vw);max-height:82vh;overflow:hidden;
+  display:flex;flex-direction:column;flex-shrink:0;
+  box-shadow:0 8px 40px rgba(0,0,0,.6);
+}
+.dd-header{
+  display:flex;align-items:center;gap:12px;
+  padding:14px 18px;border-bottom:1px solid var(--line);flex-shrink:0;
+}
+.dd-title{font-family:var(--mono);font-size:13px;font-weight:600;flex:1;color:var(--cyan)}
+.dd-close{
+  background:none;border:none;color:var(--dim);cursor:pointer;
+  font-size:20px;line-height:1;padding:2px 8px;transition:color .15s;
+}
+.dd-close:hover{color:var(--text)}
+.dd-agg{padding:10px 18px;border-bottom:1px solid var(--line);flex-shrink:0}
+.dd-bar-wrap{height:7px;border-radius:4px;overflow:hidden;background:var(--raised);display:flex;margin-top:6px}
+.dd-body{overflow-y:auto;flex:1}
+.dd-table{width:100%;border-collapse:collapse;font-size:12px}
+.dd-table th{
+  font-family:var(--mono);font-size:9px;color:var(--dim);
+  text-transform:uppercase;letter-spacing:.1em;
+  padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;
+  position:sticky;top:0;background:var(--panel);z-index:1;
+}
+.dd-table td{padding:8px 12px;border-bottom:1px solid rgba(26,45,71,.5);vertical-align:middle}
+.dd-table tr:hover td{background:var(--raised)}
+.dd-conv-outer{display:flex;align-items:center;gap:6px}
+.dd-conv-bar{height:4px;border-radius:2px;background:var(--raised);width:52px;display:inline-block;flex-shrink:0}
+.dd-conv-fill{height:100%;border-radius:2px;background:var(--blue)}
+.dd-reasoning{
+  color:var(--text2);cursor:pointer;max-width:260px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.dd-reasoning.expanded{white-space:normal;overflow:visible;max-width:none}
 </style>
 </head>
 <body>
@@ -568,6 +615,11 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
       </div>
     </div>
 
+    <div class="side-sec" id="source-bias-sec" style="display:none">
+      <div class="side-title">Source Bias <span style="font-weight:400;color:var(--dim);font-size:9px">7d reactions by source</span></div>
+      <div id="source-bias-list"></div>
+    </div>
+
   </aside>
 
   <!-- MAIN -->
@@ -614,6 +666,7 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
       <div class="sec-title">
         <span class="sec-h">Sentiment vs Price</span>
         <span class="sec-sub" id="hist-meta">— loading</span>
+        <button class="rbtn" style="margin-left:auto" onclick="if(historyChart)historyChart.resetZoom()">reset zoom</button>
       </div>
       <div class="atabs" id="history-tabs"></div>
       <div class="chart-h180"><canvas id="historyChart" role="img" aria-label="Sentiment vs price"></canvas></div>
@@ -626,6 +679,15 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size
         <span class="sec-sub" id="split-meta">hedge_fund + prop_trader vs retail_amateur · 24h</span>
       </div>
       <div id="archetype-split-list"><div class="empty" style="padding:12px 0;font-size:11px;color:var(--dim)">Loading...</div></div>
+    </div>
+
+    <!-- Cross-asset correlation matrix (CHANGE 7) -->
+    <div class="sec" id="correlation-sec" style="display:none">
+      <div class="sec-title">
+        <span class="sec-h">Cross-Asset Correlation</span>
+        <span class="sec-sub">Pearson · last 48 sentiment snapshots · red &gt;0.7 · amber 0.3–0.7 · green &lt;0.3 · blue &lt;0</span>
+      </div>
+      <div id="correlation-matrix" style="overflow-x:auto"></div>
     </div>
 
     <!-- Distributions 2×2 -->
@@ -694,6 +756,8 @@ let _tickSnapshots = [];
 let _tickWindow    = '48h';
 let _alertedKeys   = new Set();
 let _regimeData    = null;
+let _marketOpen    = true;   // updated by fetchLiveState; true by default (assume open)
+let _lastSentimentData = null; // cached /api/investors/sentiment response for toggle (CHANGE 6)
 
 const ARCH_COLORS = {
   retail_amateur:'#00e676', retail_experienced:'#448aff', prop_trader:'#ffd740',
@@ -775,7 +839,10 @@ function initCharts(){
     options:{
       responsive:true,maintainAspectRatio:false,
       interaction:{mode:'index',intersect:false},
-      plugins:{legend:{display:true,labels:{color:tc,font:{family:M,size:9},boxWidth:9}}},
+      plugins:{
+        legend:{display:true,labels:{color:tc,font:{family:M,size:9},boxWidth:9}},
+        zoom:{zoom:{wheel:{enabled:true},pinch:{enabled:true},mode:'x'},pan:{enabled:true,mode:'x'}}
+      },
       scales:{
         x:{ticks:{color:tc,font:{family:M,size:8}},grid:{color:gc}},
         y:{ticks:{color:'#00e676',font:{family:M,size:9}},grid:{color:gc},title:{display:true,text:'Sentiment',color:'#00e676',font:{family:M,size:8}}},
@@ -884,14 +951,19 @@ function renderSignals(sigs){
       contraHtml='<div class="st-contra">⚡ REGIME CONTRA</div>';
     }
     const warnHtml=warnFear?'<span class="st-warn">⚠ </span>':'';
-    return `<div class="stile ${cls}">
+    // Market closed badge — grey out non-crypto assets outside US market hours
+    const isCrypto=s.asset==='crypto';
+    const closedBadge=(!_marketOpen&&!isCrypto)?'<div style="font-family:var(--mono);font-size:8px;color:var(--dim);margin-top:3px;letter-spacing:.5px">MARKET CLOSED</div>':'';
+    const closedStyle=(!_marketOpen&&!isCrypto)?'opacity:.55;filter:saturate(.4)':'';
+    const effectiveCls=(!_marketOpen&&!isCrypto)?'neut':cls;
+    return `<div class="stile ${effectiveCls}" style="${closedStyle}" onclick="openDrilldown('${s.asset}')">
       <div class="st-label">${warnHtml}${s.asset.replace(/_/g,' ')}</div>
-      <div class="st-signal ${cls}">${sig}</div>
+      <div class="st-signal ${effectiveCls}">${sig}</div>
       <div class="st-price">${s.price!=null?'$'+s.price.toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</div>
       <div class="st-chg ${chgCls}">${chgStr}</div>
       <div class="st-score">score ${scoreStr} · ${s.event_count??0} events</div>
       <div class="st-bar"><div class="st-bar-fill" style="width:${barPct}%;background:${barCol}"></div></div>
-      ${contraHtml}
+      ${contraHtml}${closedBadge}
     </div>`;
   }).join('');
 }
@@ -1036,7 +1108,18 @@ function setSentimentMode(mode){
   _sentimentMode=mode;
   document.getElementById('toggle-cap').classList.toggle('on',mode==='capital');
   document.getElementById('toggle-eq').classList.toggle('on',mode==='equal');
-  renderTickSentChart(_tickSnapshots);
+  if(mode==='equal'&&_lastSentimentData?.by_asset_class_equal){
+    // Render equal-weighted current scores from cached API response.
+    // Converts the flat {asset:score} dict into a single-snapshot array so
+    // renderTickSentChart() can display it without refetching.
+    const eq=_lastSentimentData.by_asset_class_equal;
+    renderTickSentChart([{timestamp:new Date().toISOString(),assets:eq}]);
+    document.getElementById('tick-chart-title').textContent='Sentiment — equal-weighted (now)';
+  }else{
+    renderTickSentChart(_tickSnapshots);
+    document.getElementById('tick-chart-title').textContent=
+      _tickWindow==='30d'?'Sentiment — 30d full resolution':'Sentiment — 48h tick';
+  }
 }
 
 // ── Time-window toggle ────────────────────────────────────────────────────────
@@ -1143,11 +1226,16 @@ function checkAlertStrip(){
   if(strip.querySelectorAll('.achip').length===0)strip.classList.remove('on');
 }
 
-// ── Legacy sentiment fetch (kept for API compat) ──────────────────────────────
+// ── Sentiment fetch — caches response for capital/equal toggle ────────────────
 async function fetchSentiment(){
   try{
-    await fetch(`${API}/api/investors/sentiment?graph_id=${GRAPH_ID}`);
-    // tick chart driven by fetchTickSentimentHistory
+    const res=await fetch(`${API}/api/investors/sentiment?graph_id=${GRAPH_ID}`);
+    if(!res.ok)return;
+    const json=await res.json();
+    if(!json.success)return;
+    _lastSentimentData=json.data;
+    // Tick chart is driven by fetchTickSentimentHistory; this cached data
+    // powers the capital/equal-weighted toggle in setSentimentMode().
   }catch(e){}
 }
 
@@ -1260,6 +1348,10 @@ async function fetchLiveState(){
     if(s.top_entities?.length)renderTopEntities(s.top_entities);
     if(s.feed_breakdown?.length)renderFeedBreakdown(s.feed_breakdown);
     renderDrawdowns(s.drawdowns||null);
+    if(s.source_bias)renderSourceBias(s.source_bias);
+    if(s.correlation_matrix)renderCorrelationMatrix(s.correlation_matrix);
+    // Market open state — drives signal tile greying
+    _marketOpen=(s.market_open!==false);
 
     fetchTickSentimentHistory();
     fetchSignalHistory();
@@ -1414,6 +1506,57 @@ function renderDrawdowns(drawdowns){
   }).join('');
 }
 
+// ── Source Bias panel (CHANGE 4 Item 3) ───────────────────────────────────────
+function renderSourceBias(bias){
+  const sec=document.getElementById('source-bias-sec');
+  const list=document.getElementById('source-bias-list');
+  if(!sec||!list)return;
+  const entries=Object.entries(bias||{});
+  if(!entries.length){sec.style.display='none';return;}
+  sec.style.display='';
+  const rxColors={buy:'var(--green)',sell:'var(--red)',hold:'var(--dim)',hedge:'var(--amber)',panic:'var(--purple)'};
+  list.innerHTML=entries.sort((a,b)=>(b[1].total_events||0)-(a[1].total_events||0)).map(([src,dist])=>{
+    const reactions=['buy','hold','hedge','sell','panic'].filter(r=>dist[r]!=null);
+    const bars=reactions.map(r=>`<div title="${r} ${dist[r]}%" style="width:${dist[r]}%;background:${rxColors[r]||'var(--dim)'}"></div>`).join('');
+    return `<div style="margin-bottom:6px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:2px">
+        <span style="font-family:var(--mono);font-size:9px;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px">${src}</span>
+        <span style="font-family:var(--mono);font-size:8px;color:var(--dim)">${dist.total_events}ev</span>
+      </div>
+      <div style="display:flex;height:6px;border-radius:3px;overflow:hidden;background:var(--line)">${bars}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── Correlation matrix heatmap (CHANGE 7) ─────────────────────────────────────
+function renderCorrelationMatrix(matrix){
+  const sec=document.getElementById('correlation-sec');
+  const el=document.getElementById('correlation-matrix');
+  if(!sec||!el||!matrix)return;
+  const assets=Object.keys(matrix);
+  if(assets.length<2){sec.style.display='none';return;}
+  sec.style.display='';
+  const cellColor=v=>{
+    if(v>=0.7)return'#ff5252';     // strong positive — red
+    if(v>=0.3)return'#ffd740';     // moderate positive — amber
+    if(v>=-0.3)return'#00e676';    // weak/none — green
+    return'#448aff';               // negative — blue
+  };
+  const cellBg=v=>{
+    if(v>=0.7)return'rgba(255,82,82,.18)';
+    if(v>=0.3)return'rgba(255,215,64,.12)';
+    if(v>=-0.3)return'rgba(0,230,118,.08)';
+    return'rgba(68,138,255,.14)';
+  };
+  const header=`<th style="font-family:var(--mono);font-size:8px;color:var(--dim);padding:3px"></th>`+
+    assets.map(a=>`<th style="font-family:var(--mono);font-size:8px;color:var(--dim);padding:3px;white-space:nowrap">${a.replace(/_/g,' ')}</th>`).join('');
+  const rows=assets.map(a=>`<tr>
+    <td style="font-family:var(--mono);font-size:8px;color:var(--dim);padding:3px;white-space:nowrap">${a.replace(/_/g,' ')}</td>
+    ${assets.map(b=>{const v=matrix[a]?.[b]??0;const diag=a===b;return`<td style="font-family:var(--mono);font-size:9px;text-align:center;padding:4px 6px;border-radius:3px;background:${diag?'transparent':cellBg(v)};color:${diag?'var(--dim)':cellColor(v)}">${diag?'—':v.toFixed(2)}</td>`;}).join('')}
+  </tr>`).join('');
+  el.innerHTML=`<table style="border-collapse:collapse;min-width:100%"><thead><tr>${header}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
 // ── Main fetch (30s) ──────────────────────────────────────────────────────────
 async function fetchAll(){
   const dot=document.getElementById('pulse');
@@ -1466,11 +1609,80 @@ async function fetchAll(){
   }
 }
 
+// ── Agent Drilldown Modal (CHANGE 4) ─────────────────────────────────────────
+async function openDrilldown(asset){
+  try{
+    const res=await fetch(`${API}/api/signals/drilldown?graph_id=${GRAPH_ID}&asset=${asset}&limit=20`);
+    if(!res.ok)return;
+    const j=await res.json();
+    if(!j.success)return;
+    const d=j.data;
+    document.getElementById('dd-title').textContent=
+      `${asset.replace(/_/g,' ')} · top agents · 24h window`;
+    // Aggregate bar
+    const tot=(d.bull_count+d.bear_count+d.neutral_count)||1;
+    const bPct=d.bull_count/tot*100;
+    const brPct=d.bear_count/tot*100;
+    const nPct=d.neutral_count/tot*100;
+    document.getElementById('dd-agg').innerHTML=`
+      <div style="font-family:var(--mono);font-size:10px;color:var(--text2)">
+        <span style="color:var(--dim)">${d.total_agents_queried} agents queried · </span>
+        <span style="color:var(--green)">${d.bull_count} bull</span>
+        <span style="color:var(--dim)"> / </span>
+        <span style="color:var(--red)">${d.bear_count} bear</span>
+        <span style="color:var(--dim)"> / ${d.neutral_count} neutral</span>
+        ${d.top_capital_reaction?`<span style="color:var(--dim)"> · top capital: </span><span style="color:var(--amber)">${d.top_capital_reaction}</span>`:''}
+      </div>
+      <div class="dd-bar-wrap">
+        <div style="width:${bPct.toFixed(1)}%;background:var(--green)"></div>
+        <div style="width:${brPct.toFixed(1)}%;background:var(--red)"></div>
+        <div style="width:${nPct.toFixed(1)}%;background:var(--dim)"></div>
+      </div>`;
+    // Agent rows
+    const rxColor=r=>r==='buy'?'var(--green)':r==='sell'||r==='panic'?'var(--red)':r==='hedge'?'var(--amber)':'var(--dim)';
+    document.getElementById('dd-tbody').innerHTML=(d.agents||[]).map(a=>`
+      <tr>
+        <td style="font-family:var(--mono);font-size:11px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(a.name||'').replace(/"/g,"'")}">${a.name||'—'}</td>
+        <td><span style="font-family:var(--mono);font-size:10px;color:${ARCH_COLORS[a.archetype]||'var(--dim)'}">${(a.archetype||'').replace(/_/g,' ')}</span></td>
+        <td><span style="font-family:var(--mono);font-size:10px;font-weight:600;color:${rxColor(a.reaction)}">${a.reaction||'—'}</span></td>
+        <td><div class="dd-conv-outer"><div class="dd-conv-bar"><div class="dd-conv-fill" style="width:${Math.round((a.conviction||0)*100)}%"></div></div><span style="font-family:var(--mono);font-size:9px;color:var(--dim)">${(a.conviction||0).toFixed(2)}</span></div></td>
+        <td style="font-family:var(--mono);font-size:10px;white-space:nowrap">${fmtCap(a.capital_usd)}</td>
+        <td class="dd-reasoning" onclick="this.classList.toggle('expanded')" title="click to expand">${a.reasoning||'—'}</td>
+      </tr>`).join('');
+    document.getElementById('drilldown-overlay').classList.add('on');
+  }catch(e){console.warn('Drilldown fetch error:',e);}
+}
+
+function closeDrilldown(){
+  document.getElementById('drilldown-overlay').classList.remove('on');
+}
+
 initCharts();
 fetchAll();
 fetchLiveState();
 setInterval(fetchAll,30000);
 setInterval(fetchLiveState,15*60*1000);
 </script>
+
+<!-- ═══ AGENT DRILLDOWN MODAL (CHANGE 4) ═══ -->
+<div id="drilldown-overlay" onclick="if(event.target===this)closeDrilldown()">
+  <div id="drilldown-modal">
+    <div class="dd-header">
+      <span class="dd-title" id="dd-title">Agent Drilldown</span>
+      <button class="dd-close" onclick="closeDrilldown()">×</button>
+    </div>
+    <div class="dd-agg" id="dd-agg"></div>
+    <div class="dd-body">
+      <table class="dd-table">
+        <thead><tr>
+          <th>Name</th><th>Archetype</th><th>Reaction</th>
+          <th>Conviction</th><th>Capital</th><th>Reasoning</th>
+        </tr></thead>
+        <tbody id="dd-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>

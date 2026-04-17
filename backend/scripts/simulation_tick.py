@@ -32,6 +32,8 @@ import os
 import json
 import uuid
 import random
+import hashlib
+import pickle
 import argparse
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -54,6 +56,47 @@ CHECKPOINT_PATH    = Path(__file__).parent / "tick_checkpoint.json"
 _PRICES_DIR        = Path(__file__).parent.parent / "prices"
 CONTAGION_FLAG_PATH = Path(__file__).parent.parent / "briefings" / "contagion_flag.txt"
 CHECKPOINT_INTERVAL = 100
+
+# ---------------------------------------------------------------------------
+# Embedding cache (CHANGE 3)
+# Briefing chunks are expensive to embed (~2-3 min via Ollama).
+# Cache on disk keyed by SHA-256 of briefing text; skip embed on cache hit.
+# ---------------------------------------------------------------------------
+BRIEFING_CACHE_DIR = Path(__file__).parent.parent / "briefing_cache"
+try:
+    BRIEFING_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass  # non-fatal: cache will be skipped if dir can't be created
+
+
+def get_briefing_hash(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def load_chunk_cache_from_disk(cache_path: Path):
+    """Unpickle chunk cache from disk. Returns None on any error."""
+    try:
+        return pickle.loads(cache_path.read_bytes())
+    except Exception:
+        return None
+
+
+def save_chunk_cache_to_disk(cache_path: Path, chunk_cache: list) -> None:
+    """Atomically write chunk cache. Prunes to 10 most recent .pkl files."""
+    try:
+        data = pickle.dumps(chunk_cache)
+        tmp  = cache_path.with_suffix('.tmp')
+        tmp.write_bytes(data)
+        tmp.rename(cache_path)
+        # Keep only 10 most recent cache files
+        pkls = sorted(BRIEFING_CACHE_DIR.glob('*.pkl'), key=lambda p: p.stat().st_mtime)
+        for old in pkls[:-10]:
+            try:
+                old.unlink()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"Embedding cache save failed: {e}")
 SAMPLE_SIZE = 500
 TOP_K_CHUNKS = 5
 MEMORY_WINDOW_DAYS = 7
@@ -1064,6 +1107,44 @@ def call_llm_for_agent(llm: LLMClient, agent: dict, memory: list, chunks: list,
     try:
         result = llm.chat_json(messages, temperature=0.7, max_tokens=512)
 
+        # CHANGE 8: Non-ASCII language guard — detects qwen2.5:14b code-switching to Chinese.
+        # Checks the reasoning field (longest free-text output). >5% non-ASCII triggers retry
+        # with an explicit English-only prefix injected into the user message.
+        # If retry also fails, reasoning is flagged but reaction/direction/conviction are kept.
+        _reasoning_raw = result.get('reasoning', '') or ''
+        if _reasoning_raw:
+            _non_ascii = sum(1 for c in _reasoning_raw if ord(c) > 127)
+            _ratio = _non_ascii / len(_reasoning_raw)
+            if _ratio > 0.05:
+                logger.warning(
+                    f"Language guard: {_ratio:.1%} non-ASCII in reasoning for {agent.get('uuid')} "
+                    f"— retrying with English re-prompt"
+                )
+                _retry_messages = list(messages)
+                for _i, _m in enumerate(_retry_messages):
+                    if _m.get('role') == 'user':
+                        _retry_messages[_i] = {
+                            **_m,
+                            'content': 'IMPORTANT: Respond ONLY in English. Do not use any other language.\n\n' + _m['content']
+                        }
+                        break
+                try:
+                    _retry_result = llm.chat_json(_retry_messages, temperature=0.7, max_tokens=512)
+                    _retry_text = _retry_result.get('reasoning', '') or ''
+                    _retry_non_ascii = sum(1 for c in _retry_text if ord(c) > 127) if _retry_text else 0
+                    _retry_ratio = _retry_non_ascii / len(_retry_text) if _retry_text else 0
+                    if _retry_ratio <= 0.05:
+                        result = _retry_result
+                    else:
+                        logger.warning(
+                            f"Language guard: retry also {_retry_ratio:.1%} non-ASCII for {agent.get('uuid')} "
+                            f"— keeping reaction, flagging reasoning"
+                        )
+                        result['reasoning'] = '[LANGUAGE WARNING: partial non-English response] ' + (result.get('reasoning') or '')
+                except Exception as _e_retry:
+                    logger.warning(f"Language guard: retry failed for {agent.get('uuid')}: {_e_retry} — flagging reasoning")
+                    result['reasoning'] = '[LANGUAGE WARNING: partial non-English response] ' + (result.get('reasoning') or '')
+
         # Validate reaction
         if result.get('reaction') not in VALID_REACTIONS:
             result['reaction'] = 'hold'
@@ -1196,14 +1277,35 @@ def run_tick(driver, graph_id: str, briefing_path: str, full: bool = False,
                                       overlap=Config.DEFAULT_CHUNK_OVERLAP)
     chunk_texts = chunks
 
-    print(f"Embedding {len(chunk_texts)} briefing chunks...")
+    # Embedding cache (CHANGE 3) — skip costly Ollama embed on repeated briefing
+    _cache_hit  = False
+    _cache_path = None
     try:
-        chunk_embeddings = embedding_svc.embed_batch(chunk_texts)
-    except Exception as e:
-        logger.warning(f"Chunk embedding failed: {e} — proceeding with empty cache")
-        chunk_embeddings = [[] for _ in chunk_texts]
+        _briefing_hash = get_briefing_hash(briefing_text)
+        _cache_path    = BRIEFING_CACHE_DIR / f"{_briefing_hash}.pkl"
+        _loaded        = load_chunk_cache_from_disk(_cache_path)
+        if _loaded is not None:
+            chunk_cache = _loaded
+            _cache_hit  = True
+            logger.info(f"Embedding cache hit — skipping Ollama embed for {len(chunk_cache)} chunks")
+    except Exception as _ce:
+        logger.warning(f"Embedding cache check failed: {_ce} — falling back to embed")
 
-    chunk_cache = list(zip(chunk_texts, chunk_embeddings))
+    if not _cache_hit:
+        print(f"Embedding {len(chunk_texts)} briefing chunks...")
+        try:
+            chunk_embeddings = embedding_svc.embed_batch(chunk_texts)
+        except Exception as e:
+            logger.warning(f"Chunk embedding failed: {e} — proceeding with empty cache")
+            chunk_embeddings = [[] for _ in chunk_texts]
+        chunk_cache = list(zip(chunk_texts, chunk_embeddings))
+        try:
+            if _cache_path is not None:
+                save_chunk_cache_to_disk(_cache_path, chunk_cache)
+                logger.info(f"Embedding cache saved — {len(chunk_cache)} chunks")
+        except Exception as _se:
+            logger.warning(f"Embedding cache save failed: {_se}")
+
     print(f"Briefing indexed: {len(chunk_cache)} chunks cached")
 
     # --- Load agents ---

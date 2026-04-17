@@ -1,153 +1,210 @@
 {
-  "refreshed_at": "2026-04-14T21:35:46.742577+00:00",
+  "refreshed_at": "2026-04-17T11:16:59.389022+00:00",
+  "market_open": false,
   "prices": {
-    "equities": 694.460022,
-    "crypto": 74088.46875,
-    "bonds": 87.209999,
-    "commodities": 445.089996,
-    "fx": 98.125,
-    "real_estate": 94.220001,
-    "mixed": 148.089996
+    "equities": null,
+    "crypto": 75390.0,
+    "bonds": 86.279999,
+    "commodities": 440.079987,
+    "fx": 98.129997,
+    "real_estate": 95.160004,
+    "mixed": 148.789993
   },
   "price_changes_24h": {
-    "equities": 1.2185,
-    "crypto": -0.1124,
-    "bonds": 0.5303,
-    "commodities": 2.2349,
-    "fx": -0.2531,
-    "real_estate": 0.9536,
-    "mixed": 1.1544
+    "equities": null,
+    "crypto": 0.5634,
+    "bonds": 0.0,
+    "commodities": 0.0,
+    "fx": -0.0509,
+    "real_estate": 0.0,
+    "mixed": 0.0
   },
+  "price_staleness_hours": 0.0,
   "sentiment": {
     "by_asset_class": {
-      "equities": 0.1173,
-      "crypto": -0.4844,
-      "bonds": -0.1156,
-      "commodities": 0.6557,
-      "fx": 0.4044,
-      "real_estate": 0.2652,
-      "mixed": 0.7793
+      "equities": -0.1091,
+      "crypto": -0.5331,
+      "bonds": -0.1609,
+      "commodities": 0.3867,
+      "fx": 0.0984,
+      "real_estate": 0.0856,
+      "mixed": 0.2026
     },
     "by_asset_class_equal": {
-      "equities": 0.4563,
-      "crypto": 0.1542,
-      "bonds": 0.0656,
-      "commodities": 0.602,
-      "fx": 0.3616,
-      "real_estate": 0.2854,
-      "mixed": 0.3322
+      "equities": 0.2564,
+      "crypto": -0.0071,
+      "bonds": -0.0139,
+      "commodities": 0.4844,
+      "fx": 0.1709,
+      "real_estate": 0.0112,
+      "mixed": 0.1983
     },
-    "fear_greed": "greed"
+    "fear_greed": "neutral"
   },
   "reaction_distribution": {
-    "buy": 28.02,
-    "sell": 18.36,
-    "hold": 51.21,
-    "hedge": 2.42,
+    "buy": 19.4,
+    "sell": 13.93,
+    "hold": 64.18,
+    "hedge": 2.49,
     "panic": 0
   },
   "drawdowns": {
     "equities": {
-      "peak": 0.9812,
-      "current": 0.282,
-      "drawdown_pct": -71.26
+      "peak": 0.9576,
+      "current": -0.4212,
+      "drawdown_pct": -100.0
     },
     "crypto": {
       "peak": 1.0,
-      "current": -0.9998,
+      "current": -0.9912,
       "drawdown_pct": -100.0
     },
     "bonds": {
-      "peak": 0.9966,
-      "current": -0.6463,
-      "drawdown_pct": -100.0
+      "peak": 0.9814,
+      "current": 0.535,
+      "drawdown_pct": -45.49
     },
     "commodities": {
       "peak": 1.0,
-      "current": 0.9706,
-      "drawdown_pct": -2.94
+      "current": 0.2903,
+      "drawdown_pct": -70.97
     },
     "fx": {
-      "peak": 0.9896,
-      "current": 0.7226,
-      "drawdown_pct": -26.98
+      "peak": 1.0,
+      "current": -0.0056,
+      "drawdown_pct": -100.0
     },
     "real_estate": {
       "peak": 1.0,
-      "current": 0.0924,
-      "drawdown_pct": -90.76
+      "current": -0.8365,
+      "drawdown_pct": -100.0
     },
     "mixed": {
-      "peak": 0.9946,
-      "current": 0.1495,
-      "drawdown_pct": -84.97
+      "peak": 0.998,
+      "current": 0.1214,
+      "drawdown_pct": -87.84
+    }
+  },
+  "correlation_matrix": {
+    "equities": {
+      "equities": 1.0,
+      "crypto": 0.2111,
+      "bonds": 0.1505,
+      "commodities": 0.2712,
+      "fx": -0.0908,
+      "real_estate": 0.0281,
+      "mixed": 0.2699
+    },
+    "crypto": {
+      "equities": 0.2111,
+      "crypto": 1.0,
+      "bonds": 0.0933,
+      "commodities": 0.0347,
+      "fx": 0.0957,
+      "real_estate": 0.1364,
+      "mixed": 0.0898
+    },
+    "bonds": {
+      "equities": 0.1505,
+      "crypto": 0.0933,
+      "bonds": 1.0,
+      "commodities": -0.0006,
+      "fx": -0.1176,
+      "real_estate": 0.1813,
+      "mixed": 0.0261
+    },
+    "commodities": {
+      "equities": 0.2712,
+      "crypto": 0.0347,
+      "bonds": -0.0006,
+      "commodities": 1.0,
+      "fx": -0.1052,
+      "real_estate": -0.0883,
+      "mixed": 0.0569
+    },
+    "fx": {
+      "equities": -0.0908,
+      "crypto": 0.0957,
+      "bonds": -0.1176,
+      "commodities": -0.1052,
+      "fx": 1.0,
+      "real_estate": -0.0241,
+      "mixed": 0.1007
+    },
+    "real_estate": {
+      "equities": 0.0281,
+      "crypto": 0.1364,
+      "bonds": 0.1813,
+      "commodities": -0.0883,
+      "fx": -0.0241,
+      "real_estate": 1.0,
+      "mixed": 0.1711
+    },
+    "mixed": {
+      "equities": 0.2699,
+      "crypto": 0.0898,
+      "bonds": 0.0261,
+      "commodities": 0.0569,
+      "fx": 0.1007,
+      "real_estate": 0.1711,
+      "mixed": 1.0
     }
   },
   "signals": [
     {
       "asset": "equities",
       "direction": "neutral",
-      "confidence": 0.1173,
-      "price": 694.460022,
-      "change_24h": 1.2185
+      "confidence": -0.1091,
+      "price": null,
+      "change_24h": null
     },
     {
       "asset": "crypto",
       "direction": "bearish",
-      "confidence": -0.4844,
-      "price": 74088.46875,
-      "change_24h": -0.1124
+      "confidence": -0.5331,
+      "price": 75390.0,
+      "change_24h": 0.5634
     },
     {
       "asset": "bonds",
       "direction": "neutral",
-      "confidence": -0.1156,
-      "price": 87.209999,
-      "change_24h": 0.5303
+      "confidence": -0.1609,
+      "price": 86.279999,
+      "change_24h": 0.0
     },
     {
       "asset": "commodities",
-      "direction": "bullish",
-      "confidence": 0.6557,
-      "price": 445.089996,
-      "change_24h": 2.2349
+      "direction": "neutral",
+      "confidence": 0.3867,
+      "price": 440.079987,
+      "change_24h": 0.0
     },
     {
       "asset": "fx",
-      "direction": "bullish",
-      "confidence": 0.4044,
-      "price": 98.125,
-      "change_24h": -0.2531
+      "direction": "neutral",
+      "confidence": 0.0984,
+      "price": 98.129997,
+      "change_24h": -0.0509
     },
     {
       "asset": "real_estate",
       "direction": "neutral",
-      "confidence": 0.2652,
-      "price": 94.220001,
-      "change_24h": 0.9536
+      "confidence": 0.0856,
+      "price": 95.160004,
+      "change_24h": 0.0
     },
     {
       "asset": "mixed",
-      "direction": "bullish",
-      "confidence": 0.7793,
-      "price": 148.089996,
-      "change_24h": 1.1544
+      "direction": "neutral",
+      "confidence": 0.2026,
+      "price": 148.789993,
+      "change_24h": 0.0
     }
   ],
   "top_entities": [
     {
       "name": "Commodities",
       "type": "AssetClass",
-      "count": 1
-    },
-    {
-      "name": "Crypto",
-      "type": "Product",
-      "count": 2
-    },
-    {
-      "name": "Equities",
-      "type": "Company",
       "count": 1
     },
     {
@@ -161,8 +218,18 @@
       "count": 1
     },
     {
+      "name": "Crypto",
+      "type": "Product",
+      "count": 2
+    },
+    {
       "name": "FX",
       "type": "AssetClass",
+      "count": 1
+    },
+    {
+      "name": "Equities",
+      "type": "Company",
       "count": 1
     },
     {
@@ -171,122 +238,579 @@
       "count": 1
     },
     {
-      "name": "U.S.",
+      "name": "Nvidia",
       "type": "Location",
-      "count": 25
-    },
-    {
-      "name": "Social Security",
-      "type": "Company",
-      "count": 17
+      "count": 5
     },
     {
       "name": "Iran",
       "type": "Location",
-      "count": 10
+      "count": 4
+    },
+    {
+      "name": "U.S.",
+      "type": "Location",
+      "count": 3
     }
   ],
   "recent_events": [
     {
-      "agent": "Shirin Sharma",
-      "archetype": "retail_amateur",
-      "reaction": "hold",
-      "confidence": 3.5,
-      "reasoning": "The news doesn't provide clear direction or impact on my portfolio. I'm unsure how to react.",
-      "timestamp": "2026-04-14T21:35:44.317787+00:00"
-    },
-    {
-      "agent": "Marie Wang",
+      "agent": "Sin\u00e9ad Perez",
       "archetype": "fund_manager",
       "reaction": "hold",
       "confidence": 4.0,
-      "reasoning": "The news is not directly relevant to my current portfolio and does not provide a clear mandate-compliant thesis for action.",
-      "timestamp": "2026-04-14T21:35:38.693925+00:00"
+      "reasoning": "The geopolitical tensions do not provide a clear directional signal within my mandate.",
+      "timestamp": "2026-04-17T11:16:59.179903+00:00"
     },
     {
-      "agent": "Jessica Reyes",
-      "archetype": "retail_experienced",
-      "reaction": "hold",
-      "confidence": 5.2,
-      "reasoning": "The news about Iran and oil prices might impact commodities in the short term but does not fundamentally alter their long-term value or my portfolio strategy.",
-      "timestamp": "2026-04-14T21:35:32.375191+00:00"
-    },
-    {
-      "agent": "Mia Tanaka",
-      "archetype": "hedge_fund",
-      "reaction": "sell",
-      "confidence": 9.5,
-      "reasoning": "The geopolitical tension between Iran and the U.S. could destabilize commodities markets, increasing volatility and posing significant risks to my leveraged positions in commodities.",
-      "timestamp": "2026-04-14T21:35:18.641293+00:00"
-    },
-    {
-      "agent": "Laura Young",
-      "archetype": "retail_experienced",
-      "reaction": "buy",
-      "confidence": 7.5,
-      "reasoning": "The U.S. economy and stock market appear to be holding up well despite geopolitical tensions involving Iran.",
-      "timestamp": "2026-04-14T21:35:04.920469+00:00"
-    },
-    {
-      "agent": "Jean Choi",
+      "agent": "Meena Simon",
       "archetype": "retail_amateur",
       "reaction": "hold",
-      "confidence": 4.0,
-      "reasoning": "The news does not directly impact my investment strategy or current portfolio.",
-      "timestamp": "2026-04-14T21:34:59.273442+00:00"
+      "confidence": 3.4,
+      "reasoning": "The news is not directly relevant to my current holdings in equities and does not provide enough context for me to make a decision.",
+      "timestamp": "2026-04-17T11:16:54.865515+00:00"
     },
     {
-      "agent": "Pedro Romano",
-      "archetype": "retail_experienced",
-      "reaction": "buy",
-      "confidence": 6.5,
-      "reasoning": "The news about biotech's growth and potential dealmaking opportunities aligns with my long-term strategy.",
-      "timestamp": "2026-04-14T21:34:54.202427+00:00"
-    },
-    {
-      "agent": "Catherine Moreau",
+      "agent": "Xiao Ivanov",
       "archetype": "retail_experienced",
       "reaction": "hold",
-      "confidence": 3.0,
-      "reasoning": "The news is not directly relevant to my current exposure in fx and does not provide clear signals for immediate action.",
-      "timestamp": "2026-04-14T21:34:48.443522+00:00"
+      "confidence": 2.5,
+      "reasoning": "The news about wheat and natural gas basis pricing does not provide clear direction for my current long-term growth strategy. The geopolitical tensions with Iran might impact crude oil but are not directly relevant to my existing positions.",
+      "timestamp": "2026-04-17T11:16:49.865931+00:00"
     },
     {
-      "agent": "Giulia Diaz",
+      "agent": "Patrick Jackson",
       "archetype": "retail_amateur",
       "reaction": "hold",
       "confidence": 2.5,
-      "reasoning": "The news about Ero Copper and Alphabet does not directly impact my equities portfolio or align with my current risk tolerance and investment strategy.",
-      "timestamp": "2026-04-14T21:34:33.910497+00:00"
+      "reasoning": "The news does not directly impact my portfolio or investment strategy.",
+      "timestamp": "2026-04-17T11:16:43.954261+00:00"
     },
     {
-      "agent": "Pavel Wu",
+      "agent": "Olivia Meyer",
+      "archetype": "prop_trader",
+      "reaction": "buy",
+      "confidence": 8.0,
+      "reasoning": "The news of increased volatility in natural gas and wheat due to speculative trading aligns with my momentum strategy, presenting a buying opportunity into potential short-term panic sells.",
+      "timestamp": "2026-04-17T11:16:39.792309+00:00"
+    },
+    {
+      "agent": "Lily Torres",
+      "archetype": "fund_manager",
+      "reaction": "hold",
+      "confidence": 4.0,
+      "reasoning": "The news does not provide a clear signal to deviate from my current index strategy within the next hour.",
+      "timestamp": "2026-04-17T11:16:34.333014+00:00"
+    },
+    {
+      "agent": "Ingrid Ryan",
+      "archetype": "hedge_fund",
+      "reaction": "hold",
+      "confidence": 3.0,
+      "reasoning": "The news does not provide clear signals for my current FX exposure and speculative trading in commodities or technology sectors is irrelevant to my strategy.",
+      "timestamp": "2026-04-17T11:16:29.431364+00:00"
+    },
+    {
+      "agent": "Ahmed Jimenez",
+      "archetype": "hedge_fund",
+      "reaction": "sell",
+      "confidence": 9.0,
+      "reasoning": "The escalation of the U.S.-Iran tensions is likely to increase risk premiums and destabilize bond values due to potential disruptions in oil supply.",
+      "timestamp": "2026-04-17T11:16:23.701112+00:00"
+    },
+    {
+      "agent": "Michiko Sidorov",
       "archetype": "retail_amateur",
       "reaction": "hold",
-      "confidence": 2.0,
-      "reasoning": "The news about Ero Copper being downgraded doesn't directly affect my current position since I don't have any open positions.",
-      "timestamp": "2026-04-14T21:34:28.268604+00:00"
+      "confidence": 3.5,
+      "reasoning": "The news about quantum technology and earnings doesn't directly impact my current holdings in equities like SPY and GLD. I'm not sure how to react and feel frozen with uncertainty.",
+      "timestamp": "2026-04-17T11:16:17.258169+00:00"
+    },
+    {
+      "agent": "William Han",
+      "archetype": "retail_amateur",
+      "reaction": "hold",
+      "confidence": 3.0,
+      "reasoning": "The news does not directly impact any of my current holdings or planned investments.",
+      "timestamp": "2026-04-17T11:16:11.607156+00:00"
     }
   ],
   "pool_stats": {
     "pool_size": 8192,
-    "total_memory_events": 3846,
+    "total_memory_events": 37695,
     "fear_count": 4152,
     "greed_count": 4040
+  },
+  "source_bias": {
+    "2026-04-14_1232.txt": {
+      "buy": 52.6,
+      "hold": 42.1,
+      "sell": 5.3,
+      "total_events": 57
+    },
+    "2026-04-14_1243.txt": {
+      "buy": 67.6,
+      "hold": 27.0,
+      "sell": 5.4,
+      "total_events": 37
+    },
+    "2026-04-14_1251.txt": {
+      "buy": 51.4,
+      "hedge": 1.4,
+      "hold": 44.8,
+      "sell": 2.4,
+      "total_events": 212
+    },
+    "2026-04-14_1347.txt": {
+      "buy": 63.9,
+      "hedge": 0.5,
+      "hold": 30.2,
+      "sell": 5.4,
+      "total_events": 205
+    },
+    "2026-04-14_1417.txt": {
+      "buy": 28.0,
+      "hedge": 3.6,
+      "hold": 50.8,
+      "sell": 17.6,
+      "total_events": 193
+    },
+    "2026-04-14_1447.txt": {
+      "buy": 32.4,
+      "hedge": 2.4,
+      "hold": 56.0,
+      "sell": 9.2,
+      "total_events": 207
+    },
+    "2026-04-14_1517.txt": {
+      "buy": 48.7,
+      "hedge": 1.5,
+      "hold": 46.7,
+      "sell": 3.0,
+      "total_events": 197
+    },
+    "2026-04-14_1547.txt": {
+      "buy": 29.9,
+      "hedge": 1.5,
+      "hold": 49.7,
+      "sell": 18.8,
+      "total_events": 197
+    },
+    "2026-04-14_1617.txt": {
+      "buy": 30.6,
+      "hedge": 1.4,
+      "hold": 65.3,
+      "sell": 2.7,
+      "total_events": 219
+    },
+    "2026-04-14_1647.txt": {
+      "buy": 48.4,
+      "hedge": 0.5,
+      "hold": 46.4,
+      "sell": 4.7,
+      "total_events": 192
+    },
+    "2026-04-14_1717.txt": {
+      "buy": 57.4,
+      "hedge": 2.5,
+      "hold": 40.2,
+      "total_events": 204
+    },
+    "2026-04-14_1817.txt": {
+      "buy": 57.5,
+      "hedge": 0.9,
+      "hold": 35.5,
+      "sell": 6.1,
+      "total_events": 214
+    },
+    "2026-04-14_1847.txt": {
+      "buy": 36.4,
+      "hedge": 2.1,
+      "hold": 53.8,
+      "sell": 7.7,
+      "total_events": 195
+    },
+    "2026-04-14_1917.txt": {
+      "buy": 54.8,
+      "hedge": 0.5,
+      "hold": 39.4,
+      "sell": 5.3,
+      "total_events": 188
+    },
+    "2026-04-14_1947.txt": {
+      "buy": 19.1,
+      "hedge": 0.7,
+      "hold": 67.5,
+      "sell": 12.7,
+      "total_events": 9303
+    },
+    "2026-04-15_0947.txt": {
+      "buy": 43.3,
+      "hedge": 0.9,
+      "hold": 50.0,
+      "sell": 5.8,
+      "total_events": 224
+    },
+    "2026-04-15_1047.txt": {
+      "buy": 44.4,
+      "hedge": 0.9,
+      "hold": 50.5,
+      "sell": 4.2,
+      "total_events": 214
+    },
+    "2026-04-15_1116.txt": {
+      "buy": 25.4,
+      "hedge": 0.5,
+      "hold": 66.7,
+      "sell": 7.4,
+      "total_events": 189
+    },
+    "2026-04-15_1146.txt": {
+      "buy": 15.4,
+      "hold": 77.5,
+      "sell": 7.1,
+      "total_events": 182
+    },
+    "2026-04-15_1216.txt": {
+      "buy": 32.3,
+      "hedge": 0.5,
+      "hold": 64.2,
+      "sell": 3.0,
+      "total_events": 201
+    },
+    "2026-04-15_1246.txt": {
+      "buy": 22.5,
+      "hold": 72.3,
+      "sell": 5.2,
+      "total_events": 213
+    },
+    "2026-04-15_1316.txt": {
+      "buy": 38.6,
+      "hedge": 1.1,
+      "hold": 48.4,
+      "sell": 12.0,
+      "total_events": 184
+    },
+    "2026-04-15_1348.txt": {
+      "buy": 17.6,
+      "hedge": 0.5,
+      "hold": 80.4,
+      "sell": 1.5,
+      "total_events": 204
+    },
+    "2026-04-15_1425.txt": {
+      "buy": 28.0,
+      "hedge": 1.9,
+      "hold": 62.6,
+      "sell": 7.5,
+      "total_events": 214
+    },
+    "2026-04-15_1518.txt": {
+      "buy": 23.5,
+      "hedge": 0.5,
+      "hold": 72.5,
+      "sell": 3.4,
+      "total_events": 204
+    },
+    "2026-04-15_1547.txt": {
+      "buy": 30.7,
+      "hedge": 0.5,
+      "hold": 64.9,
+      "sell": 3.9,
+      "total_events": 205
+    },
+    "2026-04-15_1616.txt": {
+      "buy": 31.8,
+      "hedge": 1.0,
+      "hold": 63.7,
+      "sell": 3.5,
+      "total_events": 201
+    },
+    "2026-04-15_1646.txt": {
+      "buy": 28.3,
+      "hold": 65.9,
+      "sell": 5.9,
+      "total_events": 205
+    },
+    "2026-04-15_1716.txt": {
+      "buy": 39.1,
+      "hold": 50.7,
+      "sell": 10.2,
+      "total_events": 215
+    },
+    "2026-04-15_1746.txt": {
+      "buy": 46.1,
+      "hedge": 1.8,
+      "hold": 45.2,
+      "sell": 6.9,
+      "total_events": 217
+    },
+    "2026-04-15_1816.txt": {
+      "buy": 35.7,
+      "hedge": 1.4,
+      "hold": 58.2,
+      "sell": 4.7,
+      "total_events": 213
+    },
+    "2026-04-15_1847.txt": {
+      "buy": 43.5,
+      "hedge": 0.5,
+      "hold": 49.2,
+      "sell": 6.7,
+      "total_events": 193
+    },
+    "2026-04-15_1917.txt": {
+      "buy": 18.9,
+      "hedge": 0.5,
+      "hold": 60.5,
+      "sell": 20.0,
+      "total_events": 185
+    },
+    "2026-04-15_1946.txt": {
+      "buy": 31.9,
+      "hedge": 0.4,
+      "hold": 60.5,
+      "panic": 0.0,
+      "sell": 7.2,
+      "total_events": 8418
+    },
+    "2026-04-16_0739.txt": {
+      "buy": 40.6,
+      "hedge": 1.0,
+      "hold": 49.0,
+      "sell": 9.4,
+      "total_events": 202
+    },
+    "2026-04-16_0746.txt": {
+      "buy": 41.3,
+      "hedge": 1.4,
+      "hold": 52.1,
+      "sell": 5.2,
+      "total_events": 213
+    },
+    "2026-04-16_0846.txt": {
+      "buy": 36.9,
+      "hedge": 0.5,
+      "hold": 50.0,
+      "sell": 12.6,
+      "total_events": 214
+    },
+    "2026-04-16_0916.txt": {
+      "buy": 33.3,
+      "hedge": 1.4,
+      "hold": 58.9,
+      "sell": 6.3,
+      "total_events": 207
+    },
+    "2026-04-16_0947.txt": {
+      "buy": 32.2,
+      "hedge": 2.4,
+      "hold": 51.7,
+      "sell": 13.7,
+      "total_events": 205
+    },
+    "2026-04-16_1016.txt": {
+      "buy": 36.4,
+      "hedge": 1.9,
+      "hold": 56.3,
+      "sell": 5.3,
+      "total_events": 206
+    },
+    "2026-04-16_1046.txt": {
+      "buy": 45.1,
+      "hold": 47.4,
+      "sell": 7.5,
+      "total_events": 213
+    },
+    "2026-04-16_1116.txt": {
+      "buy": 33.7,
+      "hold": 63.4,
+      "sell": 3.0,
+      "total_events": 202
+    },
+    "2026-04-16_1146.txt": {
+      "buy": 17.8,
+      "hedge": 0.6,
+      "hold": 79.4,
+      "sell": 2.2,
+      "total_events": 180
+    },
+    "2026-04-16_1216.txt": {
+      "buy": 39.9,
+      "hedge": 0.5,
+      "hold": 59.0,
+      "sell": 0.5,
+      "total_events": 183
+    },
+    "2026-04-16_1246.txt": {
+      "buy": 31.2,
+      "hedge": 1.6,
+      "hold": 55.6,
+      "sell": 11.6,
+      "total_events": 189
+    },
+    "2026-04-16_1316.txt": {
+      "buy": 23.6,
+      "hedge": 1.0,
+      "hold": 61.5,
+      "sell": 13.8,
+      "total_events": 195
+    },
+    "2026-04-16_1346.txt": {
+      "buy": 35.4,
+      "hedge": 1.1,
+      "hold": 59.8,
+      "sell": 3.7,
+      "total_events": 189
+    },
+    "2026-04-16_1416.txt": {
+      "buy": 17.9,
+      "hedge": 2.6,
+      "hold": 70.5,
+      "sell": 9.0,
+      "total_events": 78
+    },
+    "2026-04-16_1505.txt": {
+      "buy": 26.7,
+      "hedge": 1.0,
+      "hold": 59.5,
+      "sell": 12.8,
+      "total_events": 195
+    },
+    "2026-04-16_1535.txt": {
+      "buy": 27.6,
+      "hedge": 0.9,
+      "hold": 64.1,
+      "sell": 7.4,
+      "total_events": 217
+    },
+    "2026-04-16_1605.txt": {
+      "buy": 19.2,
+      "hedge": 0.9,
+      "hold": 73.2,
+      "sell": 6.6,
+      "total_events": 213
+    },
+    "2026-04-16_1635.txt": {
+      "buy": 11.8,
+      "hedge": 1.4,
+      "hold": 84.0,
+      "sell": 2.8,
+      "total_events": 212
+    },
+    "2026-04-16_1705.txt": {
+      "buy": 6.8,
+      "hedge": 1.0,
+      "hold": 78.7,
+      "sell": 13.5,
+      "total_events": 207
+    },
+    "2026-04-16_1735.txt": {
+      "buy": 22.7,
+      "hold": 76.3,
+      "sell": 1.0,
+      "total_events": 207
+    },
+    "2026-04-16_1805.txt": {
+      "buy": 46.9,
+      "hedge": 1.5,
+      "hold": 40.3,
+      "sell": 11.2,
+      "total_events": 196
+    },
+    "2026-04-16_1835.txt": {
+      "buy": 42.1,
+      "hedge": 0.9,
+      "hold": 49.5,
+      "sell": 7.4,
+      "total_events": 216
+    },
+    "2026-04-16_2002.txt": {
+      "buy": 28.8,
+      "hedge": 1.0,
+      "hold": 60.2,
+      "sell": 9.9,
+      "total_events": 191
+    },
+    "2026-04-16_2032.txt": {
+      "buy": 20.4,
+      "hold": 78.2,
+      "sell": 1.4,
+      "total_events": 216
+    },
+    "2026-04-16_2102.txt": {
+      "buy": 30.6,
+      "hold": 60.2,
+      "sell": 9.2,
+      "total_events": 206
+    },
+    "2026-04-16_2132.txt": {
+      "buy": 9.8,
+      "hold": 87.9,
+      "sell": 2.3,
+      "total_events": 215
+    },
+    "2026-04-16_2202.txt": {
+      "buy": 31.3,
+      "hold": 58.1,
+      "sell": 10.6,
+      "total_events": 217
+    },
+    "2026-04-16_2232.txt": {
+      "buy": 53.2,
+      "hedge": 0.5,
+      "hold": 37.8,
+      "sell": 8.5,
+      "total_events": 201
+    },
+    "2026-04-16_2302.txt": {
+      "buy": 37.2,
+      "hedge": 1.0,
+      "hold": 56.0,
+      "sell": 5.8,
+      "total_events": 191
+    },
+    "2026-04-16_2332.txt": {
+      "buy": 19.2,
+      "hold": 79.8,
+      "sell": 1.0,
+      "total_events": 198
+    },
+    "2026-04-17_0002.txt": {
+      "buy": 43.5,
+      "hedge": 1.0,
+      "hold": 55.5,
+      "total_events": 200
+    },
+    "2026-04-17_0032.txt": {
+      "buy": 22.3,
+      "hedge": 0.5,
+      "hold": 70.4,
+      "sell": 6.8,
+      "total_events": 206
+    },
+    "2026-04-17_0102.txt": {
+      "buy": 19.8,
+      "hedge": 0.6,
+      "hold": 69.8,
+      "sell": 9.9,
+      "total_events": 7414
+    }
   },
   "feed_breakdown": [
     {
       "source": "Yahoo Finance",
-      "count": 16
+      "count": 4
+    },
+    {
+      "source": "FT Markets",
+      "count": 1
     },
     {
       "source": "Seeking Alpha",
-      "count": 6
-    },
-    {
-      "source": "MarketWatch",
-      "count": 2
+      "count": 1
     }
   ],
-  "last_tick_at": "2026-04-14T19:05:34.300415+00:00"
+  "last_tick_at": "2026-04-17T00:32:18.845492+00:00",
+  "last_daily_at": "2026-04-16T06:38:25.650529+00:00"
 }

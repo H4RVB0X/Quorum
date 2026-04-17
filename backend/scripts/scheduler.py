@@ -3,15 +3,15 @@ scheduler.py — APScheduler orchestrator for MiroFish live news pipeline.
 
 Jobs:
   - Half-hourly (every 30 min):  news_fetcher → incremental_update → simulation_tick (500 agents)
-  - Daily  (20:00 UTC):          simulation_tick --full (all agents, no sampling)
-                                  Finishes ~06:00 UTC next day — data fresh before US open.
+  - Daily  (02:00 UTC):          simulation_tick --full (all agents, no sampling)
+                                  Starts 2am UTC, finishes ~12pm UTC — well before US market open at 13:30 UTC.
   - Weekly (Sunday 04:00 UTC):   MemoryEvent TTL pruning — DETACH DELETE events older than 90 days.
 
 Mutex: _daily_running Event blocks the half-hourly tick while daily job is running.
 Status: writes /backend/scripts/status.json after every job cycle.
 Log: appends to /backend/logs/scheduler_runs.json after every job completes.
 Catch-up: on startup and after every job, re-checks for overdue jobs:
-  - daily: if past 20:00 UTC and not yet run today (UTC date)
+  - daily: if past 02:00 UTC and not yet run today (UTC date)
   - half-hourly: if last completed run > 30 min ago (or no record exists)
   Daily always runs before half-hourly if both are overdue.
 
@@ -219,9 +219,9 @@ def run_catchup(graph_id: str, status_path: Path, status_state: dict) -> None:
     try:
         now = datetime.now(timezone.utc)
 
-        # Step 1 — daily overdue? (past 20:00 UTC and not yet run today)
+        # Step 1 — daily overdue? (past 02:00 UTC and not yet run today)
         daily_overdue = False
-        if now.hour >= 20:
+        if now.hour >= 2:
             last_daily = _last_run_of_type('daily')
             if last_daily is None:
                 daily_overdue = True
@@ -644,11 +644,11 @@ def main():
         misfire_grace_time=None,
     )
 
-    # Daily job — 20:00 UTC
+    # Daily job — 02:00 UTC (starts 2am UTC, finishes ~12pm UTC, before US market open at 13:30 UTC)
     scheduler.add_job(
         daily_job,
         trigger='cron',
-        hour=20,
+        hour=2,
         minute=0,
         kwargs={'graph_id': graph_id, 'status_path': STATUS_PATH, 'status_state': status_state},
         id='daily',

@@ -63,9 +63,42 @@ RSS_FEEDS = [
     ("AP Business",  "https://apnews.com/hub/business/feed"),
 ]
 
+# ---------------------------------------------------------------------------
+# Nitter self-hosting guide
+#
+# Public nitter.net instances are unreliable (timeouts, bans, rate limits).
+# To reliably feed Twitter/X content into Quorum, run your own Nitter in Docker.
+#
+# Docker image:
+#   ghcr.io/zedeus/nitter:latest  (actively maintained community fork)
+#
+# docker-compose.yml service block to add:
+# ─────────────────────────────────────────────────────────────────────────────
+#   nitter:
+#     image: ghcr.io/zedeus/nitter:latest
+#     container_name: nitter
+#     ports:
+#       - "8080:8080"
+#     environment:
+#       - NITTER_HOST=0.0.0.0
+#       - NITTER_PORT=8080
+#       # Twitter bearer token (required for API v2 access):
+#       - NITTER_BEARER_TOKEN=${NITTER_BEARER_TOKEN}
+#     restart: unless-stopped
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Required environment variables (add to .env):
+#   NITTER_BEARER_TOKEN=<your Twitter API v2 Bearer Token>
+#
+# Once nitter is healthy:
+#   1. Update NITTER_FEEDS below to use http://localhost:8080 instead of https://nitter.net
+#   2. Set NITTER_ENABLED = True
+#   3. docker cp this file into the container and restart mirofish-offline
+# ---------------------------------------------------------------------------
+
 # Set False to disable all Nitter feeds without code changes (e.g. if instances go down).
 # Currently disabled — public nitter.net instances are timing out on every request.
-# Re-enable only when self-hosted Nitter is running in Docker.
+# Re-enable only when self-hosted Nitter is running in Docker (see guide above).
 NITTER_ENABLED = False
 
 NITTER_FEEDS = [
@@ -89,6 +122,38 @@ CENTRAL_BANK_FEEDS = [
     ("ECB",             "https://www.ecb.europa.eu/rss/press.html"),
     ("Bank of England", "https://www.bankofengland.co.uk/rss/news"),
 ]
+
+# ---------------------------------------------------------------------------
+# Reddit JSON API feeds (CHANGE 1)
+# Use JSON API (not feedparser) — unauthenticated, no OAuth required.
+# User-Agent required to avoid 429; 5s timeout per subreddit.
+# ---------------------------------------------------------------------------
+REDDIT_ENABLED = True
+
+REDDIT_SOURCES = {
+    "SecurityAnalysis": {"min_score": 10,  "min_body_chars": 100},
+    "investing":        {"min_score": 50,  "min_body_chars": 150},
+    "economics":        {"min_score": 50,  "min_body_chars": 100},
+    "finance":          {"min_score": 50,  "min_body_chars": 100},
+    "stocks":           {"min_score": 100, "min_body_chars": 150},
+    "wallstreetbets":   {
+        "min_score":      200,
+        "min_body_chars": 300,
+        "allowed_flairs": {
+            "DD", "News", "Discussion", "Earnings Thread",
+            "Fundamentals", "Technical Analysis",
+        },
+    },
+}
+_REDDIT_CAP = 15  # max total Reddit articles per cycle across all subreddits
+
+# ---------------------------------------------------------------------------
+# Stocktwits unauthenticated public API (CHANGE 2)
+# 200 req/hour rate limit — one request per symbol per cycle is safe.
+# No auth headers needed. Filter: sentiment not null + followers >= 50.
+# ---------------------------------------------------------------------------
+STOCKTWITS_ENABLED = True
+STOCKTWITS_SYMBOLS = ["SPY", "BTC", "GLD", "TLT", "DX-Y.NYB", "VNQ", "VT"]
 
 BRIEFINGS_DIR = Path(__file__).parent.parent / "briefings"
 SEEN_URLS_PATH = Path(__file__).parent / "seen_urls.json"
@@ -219,17 +284,198 @@ def parse_feed(source_name: str, feed_url: str, seen: dict, source_type: str = "
 
 
 # ---------------------------------------------------------------------------
+# Reddit + Stocktwits fetchers
+# ---------------------------------------------------------------------------
+
+def fetch_reddit(seen: dict) -> tuple:
+    """
+    Fetch financial posts from configured subreddits via the Reddit JSON API.
+    Returns (capped_articles, all_qualifying_hashes, per_subreddit_counts).
+
+    capped_articles: top-_REDDIT_CAP posts by score, pre-filtered, ready for
+                     filter_articles(). Each article's hash is "reddit_{id}".
+    all_qualifying_hashes: hashes for ALL posts that passed gates (to mark seen).
+    per_subreddit_counts: {"investing": 3, ...} for sidecar.
+    """
+    if not REDDIT_ENABLED:
+        return [], [], {}
+
+    all_posts: list = []  # (score, article_dict)
+    counts: dict = {}
+
+    for subreddit, cfg in REDDIT_SOURCES.items():
+        try:
+            url = f"https://www.reddit.com/r/{subreddit}/new.json?limit=25"
+            resp = requests.get(
+                url,
+                headers={"User-Agent": "Quorum/1.0 financial-simulation"},
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Reddit r/{subreddit}: HTTP {resp.status_code} — skipping")
+                counts[subreddit] = 0
+                continue
+
+            data = resp.json()
+            posts = data.get("data", {}).get("children", [])
+
+            min_score    = cfg["min_score"]
+            min_body     = cfg["min_body_chars"]
+            allowed_flairs = cfg.get("allowed_flairs")
+
+            sub_count = 0
+            for child in posts:
+                post = child.get("data", {})
+                post_id = post.get("id", "")
+                if not post_id:
+                    continue
+                score = post.get("score", 0) or 0
+                body  = post.get("selftext", "") or ""
+                flair = post.get("link_flair_text")
+
+                if score < min_score:
+                    continue
+                if len(body) < min_body:
+                    continue
+                # WSB flair filter — only applied when allowed_flairs is set
+                if allowed_flairs is not None and flair not in allowed_flairs:
+                    continue
+
+                dedup_key = f"reddit_{post_id}"
+                if dedup_key in seen:
+                    continue
+
+                article = {
+                    "title": post.get("title", "Untitled"),
+                    "source": f"[REDDIT/{subreddit}]",
+                    "url":   post.get("url", f"https://reddit.com/r/{subreddit}/comments/{post_id}"),
+                    "hash":  dedup_key,
+                    "body":  body,
+                }
+                all_posts.append((score, article))
+                sub_count += 1
+
+            counts[subreddit] = sub_count
+            logger.info(f"Reddit r/{subreddit}: {sub_count} qualifying posts")
+
+        except Exception as e:
+            logger.warning(f"Reddit r/{subreddit} failed: {e} — skipping")
+            counts[subreddit] = 0
+
+    # Cap at _REDDIT_CAP, highest-scoring first
+    all_posts.sort(key=lambda x: x[0], reverse=True)
+    capped      = [art for _, art in all_posts[:_REDDIT_CAP]]
+    all_hashes  = [art["hash"] for _, art in all_posts]
+
+    return capped, all_hashes, counts
+
+
+def fetch_stocktwits(seen: dict) -> tuple:
+    """
+    Fetch pre-labelled messages from Stocktwits public API.
+    Returns (articles, message_dedup_keys, per_symbol_counts).
+
+    Messages are NOT passed through filter_articles() — already ticker-specific.
+    Each symbol produces one combined article (summary + top-5 messages).
+    """
+    if not STOCKTWITS_ENABLED:
+        return [], [], {}
+
+    articles: list  = []
+    all_keys: list  = []
+    counts: dict    = {}
+
+    for symbol in STOCKTWITS_SYMBOLS:
+        try:
+            url  = f"https://api.stocktwits.com/api/2/streams/symbol/{symbol}.json"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code != 200:
+                logger.warning(f"Stocktwits {symbol}: HTTP {resp.status_code} — skipping")
+                counts[symbol] = 0
+                continue
+
+            data     = resp.json()
+            messages = data.get("messages", [])
+
+            qualified: list = []
+            for msg in messages:
+                entities       = msg.get("entities") or {}
+                sentiment_obj  = entities.get("sentiment") or {}
+                sentiment_basic = sentiment_obj.get("basic") if sentiment_obj else None
+                if not sentiment_basic:
+                    continue
+                followers = (msg.get("user") or {}).get("followers", 0) or 0
+                if followers < 50:
+                    continue
+                msg_id = msg.get("id")
+                if not msg_id:
+                    continue
+                dedup_key = f"stocktwits_{msg_id}"
+                if dedup_key in seen:
+                    continue
+                qualified.append({
+                    "id":        msg_id,
+                    "dedup_key": dedup_key,
+                    "body":      msg.get("body", ""),
+                    "sentiment": sentiment_basic,
+                    "followers": followers,
+                })
+
+            # Top 5 by followers
+            qualified.sort(key=lambda x: x["followers"], reverse=True)
+            top_msgs = qualified[:5]
+
+            if not top_msgs:
+                counts[symbol] = 0
+                continue
+
+            bullish = sum(1 for m in top_msgs if m["sentiment"] == "Bullish")
+            bearish = sum(1 for m in top_msgs if m["sentiment"] == "Bearish")
+
+            summary   = (
+                f"[STOCKTWITS SENTIMENT: {symbol} {bullish} bullish / "
+                f"{bearish} bearish in last 30 messages]"
+            )
+            msg_block = "\n\n".join(
+                f"[STOCKTWITS/{symbol} {m['sentiment']}] {m['body']}"
+                for m in top_msgs
+            )
+
+            articles.append({
+                "title":  f"Stocktwits {symbol}: {bullish} bullish / {bearish} bearish",
+                "source": f"Stocktwits/{symbol}",
+                "url":    f"https://stocktwits.com/symbol/{symbol}",
+                "hash":   (
+                    f"stocktwits_block_{symbol}_"
+                    f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
+                ),
+                "body":   f"{summary}\n\n{msg_block}",
+            })
+            all_keys.extend(m["dedup_key"] for m in qualified)  # mark all seen
+            counts[symbol] = len(top_msgs)
+            logger.info(f"Stocktwits {symbol}: {len(top_msgs)} messages ({bullish} bull / {bearish} bear)")
+
+        except Exception as e:
+            logger.warning(f"Stocktwits {symbol} failed: {e} — skipping")
+            counts[symbol] = 0
+
+    return articles, all_keys, counts
+
+
+# ---------------------------------------------------------------------------
 # Briefing writer
 # ---------------------------------------------------------------------------
 
 def _build_regime_header() -> str:
     """
-    TIER 3: Build a regime header string from backend/live/regime.json.
+    TIER 3 / CHANGE 5: Build a regime + calendar header string.
+    Sources: backend/live/regime.json, economic_calendar.json, earnings_calendar.json.
     Returns the header string, or a COMPUTING placeholder if unavailable.
     """
     import json as _json
     live_dir = Path(__file__).parent.parent / "live"
     regime_path = live_dir / "regime.json"
+    lines = []
     try:
         if not regime_path.exists():
             return "[MARKET REGIME: COMPUTING...]\n"
@@ -244,21 +490,66 @@ def _build_regime_header() -> str:
 
         # If any dimension is INSUFFICIENT_DATA, use the placeholder
         if any(v == "INSUFFICIENT_DATA" for v in (vol, tnd, yc, fear)):
-            return "[MARKET REGIME: COMPUTING...]\n"
-
-        vol_str = f"{vol} ({v_pct}% annualised)" if v_pct is not None else vol
-        header = f"[MARKET REGIME: {vol_str} | {tnd} | {yc} | {fear}]"
-        extras = []
-        if vix is not None:
-            extras.append(f"VIX: {vix}")
-        if spread is not None:
-            extras.append(f"Yield spread (10Y-3M): {spread}%")
-        if extras:
-            header += "\n" + "  ".join(extras)
-        return header + "\n"
+            lines.append("[MARKET REGIME: COMPUTING...]")
+        else:
+            vol_str = f"{vol} ({v_pct}% annualised)" if v_pct is not None else vol
+            regime_line = f"[MARKET REGIME: {vol_str} | {tnd} | {yc} | {fear}]"
+            extras = []
+            if vix is not None:
+                extras.append(f"VIX: {vix}")
+            if spread is not None:
+                extras.append(f"Yield spread (10Y-3M): {spread}%")
+            # CHANGE 5: VIX term structure
+            vts = regime.get("vix_term_structure")
+            vix3m = regime.get("vix3m")
+            if vts and vix3m is not None:
+                extras.append(f"VIX3M: {vix3m} ({vts})")
+            # CHANGE 5: institutional flow signal
+            flow = regime.get("flow_signal")
+            if flow:
+                extras.append(f"Flow: {flow.upper()}")
+            if extras:
+                regime_line += "\n" + "  ".join(extras)
+            lines.append(regime_line)
     except Exception as e:
         logger.warning(f"regime header: failed to read regime.json ({e}) — using placeholder")
-        return "[MARKET REGIME: COMPUTING...]\n"
+        lines.append("[MARKET REGIME: COMPUTING...]")
+
+    # CHANGE 5: Economic calendar — upcoming 48h events
+    try:
+        eco_path = live_dir / "economic_calendar.json"
+        if eco_path.exists():
+            eco = _json.loads(eco_path.read_text(encoding="utf-8"))
+            events = eco.get("events", [])
+            if events:
+                lines.append("\n[UPCOMING ECONOMIC EVENTS — next 48h]")
+                for ev in events[:5]:  # top 5 to keep briefing compact
+                    impact = ev.get("impact", "")
+                    impact_str = f" ({impact})" if impact and impact not in ("nan", "None") else ""
+                    forecast = ev.get("forecast", "")
+                    forecast_str = f" | est: {forecast}" if forecast and forecast not in ("nan", "None") else ""
+                    lines.append(f"  • {ev.get('event','')} [{ev.get('country','')}]{impact_str}{forecast_str}")
+    except Exception as e:
+        logger.warning(f"regime header: economic calendar read failed ({e})")
+
+    # CHANGE 5: Earnings calendar — upcoming 24h
+    try:
+        earn_path = live_dir / "earnings_calendar.json"
+        if earn_path.exists():
+            earn = _json.loads(earn_path.read_text(encoding="utf-8"))
+            events = earn.get("events", [])
+            if events:
+                lines.append("\n[EARNINGS REPORTS — next 24h]")
+                for ev in events[:5]:
+                    eps = ev.get("eps_est", "")
+                    eps_str = f" | EPS est: {eps}" if eps and eps not in ("nan", "None") else ""
+                    timing = ev.get("timing", "")
+                    timing_str = f" ({timing})" if timing and timing not in ("nan", "None") else ""
+                    lines.append(f"  • {ev.get('symbol','')} — {ev.get('name','')}{timing_str}{eps_str}")
+    except Exception as e:
+        logger.warning(f"regime header: earnings calendar read failed ({e})")
+
+    return "\n".join(lines) + "\n"
 
 
 def write_briefing(articles: list, output_path: Path) -> None:
@@ -276,8 +567,11 @@ def write_briefing(articles: list, output_path: Path) -> None:
         lines.append("")
         lines.append(art['body'])
         lines.append("\n---\n")
+
+    full_text = "\n".join(lines)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+    output_path.write_text(full_text, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -314,23 +608,38 @@ def fetch(dry_run: bool = False) -> Optional[Path]:
         for source_name, feed_url in NITTER_FEEDS:
             general_articles.extend(parse_feed(source_name, feed_url, seen, timeout=5))
 
-    # --- Apply relevance filter to all general + social feeds ---
-    filtered_articles = filter_articles(general_articles)
+    # --- Reddit feeds (CHANGE 1) — after general RSS, before central bank ---
+    reddit_raw: list     = []
+    reddit_all_hashes: list = []
+    reddit_counts: dict  = {}
+    if REDDIT_ENABLED:
+        reddit_raw, reddit_all_hashes, reddit_counts = fetch_reddit(seen)
+
+    # --- Apply relevance filter to all general + Reddit articles ---
+    filtered_articles = filter_articles(general_articles + reddit_raw)
 
     # --- Central bank feeds — never filtered, always tagged ---
     cb_articles: list = []
     for source_name, feed_url in CENTRAL_BANK_FEEDS:
         cb_articles.extend(parse_feed(source_name, feed_url, seen, source_type="central_bank"))
 
-    all_articles = filtered_articles + cb_articles
+    # --- Stocktwits feeds (CHANGE 2) — ticker-specific, no relevance filter needed ---
+    stocktwits_articles: list    = []
+    stocktwits_msg_keys: list    = []
+    stocktwits_counts: dict      = {}
+    if STOCKTWITS_ENABLED:
+        stocktwits_articles, stocktwits_msg_keys, stocktwits_counts = fetch_stocktwits(seen)
+
+    all_articles = filtered_articles + cb_articles + stocktwits_articles
 
     if not all_articles:
         logger.info("No new articles found.")
-        # Still mark general articles as seen to avoid re-fetching on next run
-        if general_articles or cb_articles:
+        if general_articles or reddit_raw or cb_articles or stocktwits_articles:
             now_iso = datetime.now(timezone.utc).isoformat()
-            for art in general_articles + cb_articles:
+            for art in general_articles + reddit_raw + cb_articles:
                 seen[art['hash']] = now_iso
+            for h in reddit_all_hashes + stocktwits_msg_keys:
+                seen[h] = now_iso
             save_seen_urls(seen)
         return None
 
@@ -346,33 +655,36 @@ def fetch(dry_run: bool = False) -> Optional[Path]:
 
     write_briefing(all_articles, output_path)
 
-    # Write feed breakdown sidecar for the dashboard per-feed article volume chart.
-    # Counts all fetched articles (general_articles + cb_articles, before relevance
-    # filtering) so the chart reflects every feed that returned content, not just the
-    # articles that survived the filter.
-    # Path: briefings/YYYY-MM-DD_HHMM_sources.json alongside the .txt briefing.
+    # Write feed breakdown sidecar.
+    # "sources" key: per-RSS/CB source counts (same as before).
+    # "reddit" key: per-subreddit counts of qualifying posts (pre-filter).
+    # "stocktwits" key: per-symbol counts of included messages.
     try:
         from collections import Counter as _Counter
         source_counts = _Counter(a['source'] for a in general_articles + cb_articles)
-        sidecar = [{"source": s, "count": c}
-                   for s, c in source_counts.most_common()]
+        sidecar = {
+            "sources":    [{"source": s, "count": c} for s, c in source_counts.most_common()],
+            "reddit":     reddit_counts,
+            "stocktwits": stocktwits_counts,
+        }
         sidecar_path = output_path.with_name(output_path.stem + "_sources.json")
-        sidecar_path.write_text(
-            json.dumps(sidecar, indent=2), encoding="utf-8"
-        )
+        sidecar_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
     except Exception as e:
         logger.warning(f"Sidecar sources write failed: {e} — feed breakdown will be unavailable")
 
     logger.info(
         f"Briefing written: {output_path} "
-        f"({len(all_articles)} articles — {len(filtered_articles)} general, {len(cb_articles)} central bank)"
+        f"({len(all_articles)} articles — {len(filtered_articles)} general+reddit, "
+        f"{len(cb_articles)} central bank, {len(stocktwits_articles)} stocktwits)"
     )
 
-    # Update seen-URL store with ALL fetched articles (including filtered-out ones)
-    # so non-financial articles are not re-fetched on the next run.
+    # Update seen-URL store: mark all fetched articles (including filtered-out)
+    # so non-financial items are not re-fetched on the next run.
     now_iso = datetime.now(timezone.utc).isoformat()
-    for art in general_articles + cb_articles:
+    for art in general_articles + reddit_raw + cb_articles:
         seen[art['hash']] = now_iso
+    for h in reddit_all_hashes + stocktwits_msg_keys:
+        seen[h] = now_iso
     save_seen_urls(seen)
 
     return output_path

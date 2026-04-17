@@ -1,7 +1,7 @@
 """
 Live State API — serves backend/live_state.json, price_sentiment_history.json,
-and regime.json directly. All files written by host processes; Flask reads them.
-No Neo4j query — pure file reads so all endpoints are always fast.
+regime.json, and calendar JSONs directly. All files written by host processes;
+Flask reads them. No Neo4j query — pure file reads so all endpoints are fast.
 
 Endpoints:
   GET /api/live/state?graph_id=...
@@ -17,6 +17,11 @@ Endpoints:
     Returns the current market regime dict from regime.json.
     Written by price_fetcher.py after every price fetch via compute_market_regime().
     Returns 503 if not yet computed (no price fetch has run).
+
+  GET /api/live/calendar
+    Returns merged economic + earnings calendar events (CHANGE 5).
+    Written by price_fetcher.py's fetch_economic_calendar() and fetch_earnings_calendar().
+    Returns 503 if neither calendar file has been written yet.
 """
 
 import json
@@ -41,6 +46,10 @@ _HISTORY_PATH        = _LIVE_DIR     / "price_sentiment_history.json"
 _HISTORY_PATH_ALT    = _LIVE_DIR_ALT / "price_sentiment_history.json"
 _REGIME_PATH         = _LIVE_DIR     / "regime.json"
 _REGIME_PATH_ALT     = _LIVE_DIR_ALT / "regime.json"
+_ECO_CAL_PATH        = _LIVE_DIR     / "economic_calendar.json"
+_ECO_CAL_PATH_ALT    = _LIVE_DIR_ALT / "economic_calendar.json"
+_EARN_CAL_PATH       = _LIVE_DIR     / "earnings_calendar.json"
+_EARN_CAL_PATH_ALT   = _LIVE_DIR_ALT / "earnings_calendar.json"
 
 
 def _live_state_path() -> Path:
@@ -59,6 +68,18 @@ def _regime_path() -> Path:
     if _REGIME_PATH.exists():
         return _REGIME_PATH
     return _REGIME_PATH_ALT
+
+
+def _eco_cal_path() -> Path:
+    if _ECO_CAL_PATH.exists():
+        return _ECO_CAL_PATH
+    return _ECO_CAL_PATH_ALT
+
+
+def _earn_cal_path() -> Path:
+    if _EARN_CAL_PATH.exists():
+        return _EARN_CAL_PATH
+    return _EARN_CAL_PATH_ALT
 
 
 @live_bp.route("/state", methods=["GET"])
@@ -116,5 +137,33 @@ def get_regime():
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return jsonify({"success": True, "data": data})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@live_bp.route("/calendar", methods=["GET"])
+def get_calendar():
+    """
+    CHANGE 5: Return merged economic + earnings calendar events.
+    Written by price_fetcher.py's fetch_economic_calendar() and fetch_earnings_calendar().
+    503 if neither file has been written yet.
+    """
+    eco_path  = _eco_cal_path()
+    earn_path = _earn_cal_path()
+    if not eco_path.exists() and not earn_path.exists():
+        return jsonify({
+            "success": False,
+            "error": "Calendar files not found — run price_fetcher.py (requires OpenBB)",
+        }), 503
+    try:
+        eco_data  = json.loads(eco_path.read_text(encoding="utf-8"))  if eco_path.exists()  else {"events": []}
+        earn_data = json.loads(earn_path.read_text(encoding="utf-8")) if earn_path.exists() else {"events": []}
+        return jsonify({
+            "success": True,
+            "data": {
+                "economic_calendar": eco_data,
+                "earnings_calendar":  earn_data,
+            },
+        })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500

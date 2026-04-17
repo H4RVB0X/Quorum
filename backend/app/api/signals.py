@@ -91,11 +91,22 @@ def _signal(score: float, threshold: float | None = None) -> str:
 def _price_staleness_hours() -> float | None:
     """
     Return age in hours of the most recent price file.
-    Delegates to price_fetcher.compute_price_staleness_hours() — imported lazily
-    to avoid circular dependency and handle the case where price_fetcher is not
-    on sys.path when the Flask app starts.
+    Tries live_state.json first (written by dashboard_refresh.py, avoids
+    redundant file-system scans per request). Falls back to computing from
+    price file mtimes via price_fetcher.compute_price_staleness_hours().
     Returns None if price files don't exist or import fails.
     """
+    # Fast path: live_state.json is written every 15 min by dashboard_refresh.py
+    try:
+        live_path = Path(__file__).parent.parent.parent / "live" / "live_state.json"
+        if live_path.exists():
+            data = json.loads(live_path.read_text(encoding="utf-8"))
+            val = data.get("price_staleness_hours")
+            if val is not None:
+                return float(val)
+    except Exception:
+        pass
+    # Fallback: compute from price files (slower, adds I/O per request)
     try:
         scripts_dir = os.path.normpath(
             os.path.join(os.path.dirname(__file__), '..', '..', 'scripts')
@@ -654,4 +665,116 @@ def archetype_split():
 
     except Exception as e:
         logger.error(f"Archetype split error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@signals_bp.route("/drilldown", methods=["GET"])
+def agent_drilldown():
+    """
+    CHANGE 4: Per-asset agent drill-down.
+
+    Returns the top agents driving the signal for a given asset class,
+    ordered by capital × conviction × position_size (highest impact first).
+
+    Query params:
+      graph_id (required)
+      asset    (default: equities)
+      limit    (default: 20)
+
+    Response fields per agent: name, archetype, capital_usd, leverage,
+      reaction, direction, conviction, position_size, reasoning (≤250 chars),
+      timestamp.
+    Aggregates: total_agents_queried, bull_count, bear_count, neutral_count,
+      top_capital_reaction.
+    """
+    graph_id = request.args.get("graph_id")
+    if not graph_id:
+        return jsonify({"success": False, "error": "graph_id required"}), 400
+
+    asset = request.args.get("asset", "equities")
+    limit = request.args.get("limit", 20, type=int)
+
+    try:
+        driver   = _get_driver()
+        now      = datetime.now(timezone.utc)
+        ts_24h   = (now - timedelta(hours=24)).isoformat()
+
+        with driver.session() as session:
+            rows = session.run(
+                """
+                MATCH (a:Entity {graph_id: $gid, is_synthetic: true})-[:HAS_MEMORY]->(m:MemoryEvent)
+                WHERE a.asset_class_bias = $asset
+                  AND m.timestamp >= $since
+                  AND m.direction IS NOT NULL
+                RETURN a.name               AS name,
+                       a.investor_archetype AS archetype,
+                       a.capital_usd        AS capital_usd,
+                       a.leverage_typical   AS leverage,
+                       m.reaction           AS reaction,
+                       m.direction          AS direction,
+                       m.conviction         AS conviction,
+                       m.position_size      AS position_size,
+                       m.reasoning          AS reasoning,
+                       m.timestamp          AS timestamp
+                ORDER BY (a.capital_usd * coalesce(m.conviction, 0.5) * coalesce(m.position_size, 0.3)) DESC
+                LIMIT $limit
+                """,
+                gid=graph_id, asset=asset, since=ts_24h, limit=limit,
+            ).data()
+
+        agents_out   = []
+        bull_count   = bear_count = neutral_count = 0
+        top_capital_reaction = None
+        top_capital  = -1.0
+
+        for r in rows:
+            direction  = r.get("direction", 0) or 0
+            reaction   = r.get("reaction", "hold") or "hold"
+            capital    = float(r.get("capital_usd", 0) or 0)
+            conviction = r.get("conviction")
+            if conviction is None:
+                conviction = 0.5
+            conviction = round(float(conviction), 3)
+
+            if direction > 0:
+                bull_count   += 1
+            elif direction < 0:
+                bear_count   += 1
+            else:
+                neutral_count += 1
+
+            if capital > top_capital:
+                top_capital          = capital
+                top_capital_reaction = reaction
+
+            reasoning = str(r.get("reasoning") or "")
+            agents_out.append({
+                "name":          r.get("name"),
+                "archetype":     r.get("archetype"),
+                "capital_usd":   capital,
+                "leverage":      r.get("leverage"),
+                "reaction":      reaction,
+                "direction":     direction,
+                "conviction":    conviction,
+                "position_size": r.get("position_size"),
+                "reasoning":     reasoning[:250],
+                "timestamp":     r.get("timestamp"),
+            })
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "asset":               asset,
+                "agents":              agents_out,
+                "total_agents_queried": len(agents_out),
+                "bull_count":          bull_count,
+                "bear_count":          bear_count,
+                "neutral_count":       neutral_count,
+                "top_capital_reaction": top_capital_reaction,
+                "generated_at":        now.isoformat(),
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Drilldown error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500

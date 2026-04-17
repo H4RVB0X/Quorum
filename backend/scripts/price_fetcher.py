@@ -349,6 +349,57 @@ def compute_market_regime(prices_dir: Path = _PRICES_DIR) -> dict:
         if "price_history" not in regime["data_sources"]:
             regime["data_sources"].append("price_history")
 
+    # ── Step 6: VIX term structure (VIX3M vs VIX — OpenBB only) ─────────────
+    try:
+        from openbb import obb  # type: ignore
+        vix3m = obb.equity.price.historical("^VIX3M", provider="yfinance")
+        vix3m_df = vix3m.to_dataframe()
+        close_col = "close" if "close" in vix3m_df.columns else vix3m_df.select_dtypes("number").columns[0]
+        vix3m_val = round(float(vix3m_df[close_col].dropna().iloc[-1]), 2)
+        if vix_value is not None:
+            spread_vix = round(vix3m_val - vix_value, 2)
+            if spread_vix > 1.0:
+                term_structure = "contango"      # VIX3M > VIX — market calm, normal
+            elif spread_vix < -1.0:
+                term_structure = "backwardation" # VIX3M < VIX — near-term fear spike
+            else:
+                term_structure = "flat"
+            regime["vix_term_structure"] = term_structure
+            regime["vix3m"] = vix3m_val
+            regime["vix_spread"] = spread_vix
+            regime["data_sources"].append("openbb_vix3m")
+            logger.info(f"regime: VIX3M={vix3m_val}, spread={spread_vix} → {term_structure}")
+    except Exception as e:
+        logger.warning(f"regime: VIX term structure unavailable ({type(e).__name__}: {e})")
+
+    # ── Step 7: Institutional flow (IEF/HYG — credit risk appetite) ──────────
+    try:
+        from openbb import obb  # type: ignore
+        ief_data = obb.equity.price.historical("IEF", provider="yfinance")
+        hyg_data = obb.equity.price.historical("HYG", provider="yfinance")
+        ief_df = ief_data.to_dataframe()
+        hyg_df = hyg_data.to_dataframe()
+        cc = lambda df: "close" if "close" in df.columns else df.select_dtypes("number").columns[0]
+        ief_prices = ief_df[cc(ief_df)].dropna().tolist()
+        hyg_prices = hyg_df[cc(hyg_df)].dropna().tolist()
+        if len(ief_prices) >= 5 and len(hyg_prices) >= 5:
+            # IEF (investment-grade) rising + HYG (high-yield) rising = risk-on
+            ief_5d = (ief_prices[-1] - ief_prices[-5]) / ief_prices[-5] * 100
+            hyg_5d = (hyg_prices[-1] - hyg_prices[-5]) / hyg_prices[-5] * 100
+            if hyg_5d > 0.5 and ief_5d < 0:
+                flow_signal = "risk_on"    # HY credit rallying, rates rising
+            elif ief_5d > 0.5 and hyg_5d < 0:
+                flow_signal = "risk_off"   # Flight to quality bonds, HY selling off
+            else:
+                flow_signal = "neutral"
+            regime["flow_signal"] = flow_signal
+            regime["ief_5d_pct"] = round(ief_5d, 2)
+            regime["hyg_5d_pct"] = round(hyg_5d, 2)
+            regime["data_sources"].append("openbb_ief_hyg")
+            logger.info(f"regime: IEF 5d={ief_5d:.2f}%, HYG 5d={hyg_5d:.2f}% → {flow_signal}")
+    except Exception as e:
+        logger.warning(f"regime: IEF/HYG flow signal unavailable ({type(e).__name__}: {e})")
+
     # ── Summarise insufficient_data flag ─────────────────────────────────────
     regime["insufficient_data"] = any(
         regime[k] == "INSUFFICIENT_DATA"
@@ -371,6 +422,121 @@ def compute_market_regime(prices_dir: Path = _PRICES_DIR) -> dict:
         logger.warning(f"regime: failed to write regime.json: {e}")
 
     return regime
+
+
+def fetch_economic_calendar() -> list:
+    """
+    CHANGE 5: Fetch economic calendar events for the next 48 hours via OpenBB.
+    Writes to backend/live/economic_calendar.json.
+    Returns the events list (may be empty on failure). Never raises.
+    """
+    events: list = []
+    try:
+        from openbb import obb  # type: ignore
+        cal = obb.economy.calendar(provider="fmp")
+        cal_df = cal.to_dataframe()
+        if cal_df.empty:
+            return events
+        now = datetime.now(timezone.utc)
+        cutoff = now + timedelta(hours=48)
+        # Normalise column names
+        cal_df.columns = [c.lower() for c in cal_df.columns]
+        date_col = next((c for c in ("date", "event_date", "datetime") if c in cal_df.columns), None)
+        if date_col is None:
+            logger.warning("economic_calendar: no date column found in OpenBB response")
+            return events
+
+        import pandas as pd
+        cal_df[date_col] = pd.to_datetime(cal_df[date_col], utc=True, errors="coerce")
+        upcoming = cal_df[
+            (cal_df[date_col] >= pd.Timestamp(now)) &
+            (cal_df[date_col] <= pd.Timestamp(cutoff))
+        ]
+        for _, row in upcoming.iterrows():
+            event = {
+                "event":    str(row.get("event", row.get("name", ""))),
+                "date":     row[date_col].isoformat() if not pd.isnull(row[date_col]) else None,
+                "country":  str(row.get("country", "")),
+                "impact":   str(row.get("impact", row.get("importance", ""))),
+                "forecast": str(row.get("consensus", row.get("forecast", ""))),
+                "previous": str(row.get("previous", "")),
+            }
+            events.append(event)
+        logger.info(f"economic_calendar: {len(events)} events in next 48h")
+    except Exception as e:
+        logger.warning(f"economic_calendar: OpenBB fetch failed ({type(e).__name__}: {e})")
+
+    try:
+        cal_path = _LIVE_DIR / "economic_calendar.json"
+        payload = {
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "window_hours": 48,
+            "events": events,
+        }
+        tmp = _LIVE_DIR / "economic_calendar.json.tmp"
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(cal_path)
+    except Exception as e:
+        logger.warning(f"economic_calendar: write failed: {e}")
+
+    return events
+
+
+def fetch_earnings_calendar() -> list:
+    """
+    CHANGE 5: Fetch upcoming earnings calendar for the next 24 hours via OpenBB.
+    Writes top 5 by market cap (or first 5) to backend/live/earnings_calendar.json.
+    Returns the events list (may be empty on failure). Never raises.
+    """
+    events: list = []
+    try:
+        from openbb import obb  # type: ignore
+        earnings = obb.equity.calendar.earnings(provider="fmp")
+        earn_df = earnings.to_dataframe()
+        if earn_df.empty:
+            return events
+        now = datetime.now(timezone.utc)
+        cutoff = now + timedelta(hours=24)
+        earn_df.columns = [c.lower() for c in earn_df.columns]
+        date_col = next((c for c in ("report_date", "date", "datetime") if c in earn_df.columns), None)
+        if date_col is None:
+            logger.warning("earnings_calendar: no date column in OpenBB response")
+            return events
+
+        import pandas as pd
+        earn_df[date_col] = pd.to_datetime(earn_df[date_col], utc=True, errors="coerce")
+        upcoming = earn_df[
+            (earn_df[date_col] >= pd.Timestamp(now)) &
+            (earn_df[date_col] <= pd.Timestamp(cutoff))
+        ].head(5)
+        for _, row in upcoming.iterrows():
+            event = {
+                "symbol":   str(row.get("symbol", row.get("ticker", ""))),
+                "name":     str(row.get("name", row.get("company_name", ""))),
+                "date":     row[date_col].isoformat() if not pd.isnull(row[date_col]) else None,
+                "eps_est":  str(row.get("eps_estimated", row.get("eps_estimate", ""))),
+                "rev_est":  str(row.get("revenue_estimated", "")),
+                "timing":   str(row.get("timing", row.get("when", ""))),
+            }
+            events.append(event)
+        logger.info(f"earnings_calendar: {len(events)} earnings in next 24h")
+    except Exception as e:
+        logger.warning(f"earnings_calendar: OpenBB fetch failed ({type(e).__name__}: {e})")
+
+    try:
+        earn_path = _LIVE_DIR / "earnings_calendar.json"
+        payload = {
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "window_hours": 24,
+            "events": events,
+        }
+        tmp = _LIVE_DIR / "earnings_calendar.json.tmp"
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(earn_path)
+    except Exception as e:
+        logger.warning(f"earnings_calendar: write failed: {e}")
+
+    return events
 
 
 def fetch_prices(prices_dir: Path = _PRICES_DIR) -> Path:
@@ -432,6 +598,16 @@ def fetch_prices(prices_dir: Path = _PRICES_DIR) -> Path:
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except Exception as e:
         logger.warning(f"price_fetcher: regime computation failed (snapshot written without regime): {e}")
+
+    # CHANGE 5: fetch economic + earnings calendars (OpenBB optional — never blocks)
+    try:
+        fetch_economic_calendar()
+    except Exception as e:
+        logger.warning(f"price_fetcher: economic calendar fetch failed: {e}")
+    try:
+        fetch_earnings_calendar()
+    except Exception as e:
+        logger.warning(f"price_fetcher: earnings calendar fetch failed: {e}")
 
     return out_path
 

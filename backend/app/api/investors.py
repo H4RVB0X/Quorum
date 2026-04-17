@@ -197,7 +197,12 @@ def _latest_sources_sidecar() -> list:
     if not sidecars:
         return []
     try:
-        return json.loads(sidecars[0].read_text(encoding='utf-8'))
+        raw = json.loads(sidecars[0].read_text(encoding='utf-8'))
+        # New sidecar format: {"sources": [...], "reddit": {...}, "stocktwits": {...}}
+        # Legacy format: a plain list of {"source": ..., "count": ...}
+        if isinstance(raw, list):
+            return raw
+        return raw.get("sources", [])
     except Exception:
         return []
 

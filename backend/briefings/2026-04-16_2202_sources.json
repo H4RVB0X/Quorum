@@ -1,0 +1,33 @@
+{
+  "sources": [
+    {
+      "source": "Yahoo Finance",
+      "count": 14
+    },
+    {
+      "source": "Seeking Alpha",
+      "count": 7
+    },
+    {
+      "source": "MarketWatch",
+      "count": 2
+    }
+  ],
+  "reddit": {
+    "SecurityAnalysis": 0,
+    "investing": 0,
+    "economics": 0,
+    "finance": 0,
+    "stocks": 0,
+    "wallstreetbets": 0
+  },
+  "stocktwits": {
+    "SPY": 0,
+    "BTC": 0,
+    "GLD": 0,
+    "TLT": 0,
+    "DX-Y.NYB": 0,
+    "VNQ": 0,
+    "VT": 0
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "date": "2026-04-15",
+  "fetched_at": "2026-04-15T18:46:25.568894+00:00",
+  "prices": {
+    "equities": 698.990173,
+    "crypto": 74312.640625,
+    "bonds": 86.839897,
+    "commodities": 440.709991,
+    "fx": 98.058998,
+    "mixed": 148.479095,
+    "real_estate": 94.125
+  },
+  "regime": {
+    "volatility": "LOW_VOLATILITY",
+    "trend": "INSUFFICIENT_DATA",
+    "yield_curve": "STABLE",
+    "fear": "COMPLACENT",
+    "annualised_vol_pct": 12.8,
+    "vix": null,
+    "yield_spread_pct": null,
+    "computed_at": "2026-04-15T18:46:25.569176+00:00",
+    "data_sources": [
+      "price_history",
+      "fallback_tlt_spy"
+    ],
+    "insufficient_data": true
+  }
+}
